@@ -1,36 +1,22 @@
-import yt_dlp
+import argparse
 
-def download_list_audio(url_list):
-    # Cấu hình tối ưu cho audio dài
-    ydl_opts = {
-        'format': 'bestaudio/best',  # Lấy chất lượng âm thanh tốt nhất
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',   # Chuyển sang định dạng mp3
-            'preferredquality': '192', # Chất lượng 192kbps
-        }],
-        'outtmpl': '/data/data_diarization/%(title)s.%(ext)s', # Lưu vào thư mục đích
-        'ignoreerrors': True,         # Bỏ qua video bị lỗi (video riêng tư, bản quyền...)
-        'quiet': False,               # Hiển thị tiến trình tải
-        'no_warnings': True,
-    }
+from src.pipeline import download_youtube_audio
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        print(f"Bắt đầu tải {len(url_list)} video...")
-        ydl.download(url_list)
-        print("--- Hoàn tất danh sách ---")
 
-# --- DANH SÁCH URL CỦA BẠN ---
-urls = [
-    'https://www.youtube.com/watch?v=IopTGZdIqa4&t=5s ',
-    'https://www.youtube.com/watch?v=uhdkj_Eer2w ',
-    'https://www.youtube.com/watch?v=GOizWHLdMS4 ',
-    'https://www.youtube.com/watch?v=uFmKki4PI84 ',
-    'https://www.youtube.com/watch?v=WTz94aSJMIQ ',
-    'https://www.youtube.com/watch?v=w3rswxJJbJQ ',
-    'https://www.youtube.com/watch?v=zLA_7artjus ',
-    
-]
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Download audio from a YouTube video")
+    parser.add_argument("--youtube-url", required=True, help="YouTube video URL")
+    parser.add_argument(
+        "--output-dir", default="data", help="Directory to store downloaded audio"
+    )
+    return parser
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
+    audio_path, file_id = download_youtube_audio(args.youtube_url, args.output_dir)
+    print(f"{file_id}\t{audio_path}")
+
 
 if __name__ == "__main__":
-    download_list_audio(urls)
+    main()
