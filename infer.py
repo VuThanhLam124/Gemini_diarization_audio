@@ -64,7 +64,10 @@ def main() -> None:
     output_text = format_output(lines)
 
     if args.output:
-        Path(args.output).write_text(output_text, encoding="utf-8")
+        output_path = Path(args.output)
+        if output_path.parent != Path("."):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(output_text, encoding="utf-8")
     else:
         print(output_text)
 

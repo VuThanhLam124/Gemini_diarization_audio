@@ -35,13 +35,13 @@ export GEMINI_API_KEY=YOUR_KEY
 YouTube URL:
 
 ```
-python infer.py --youtube-url "https://www.youtube.com/watch?v=VIDEO_ID" --output output.rttm
+python infer.py --youtube-url "https://www.youtube.com/watch?v=VIDEO_ID" --output ./outputs/output.rttm
 ```
 
 Audio file local:
 
 ```
-python infer.py --audio-file /path/to/audio.mp3 --file-id my_audio --output output.rttm
+python infer.py --audio-file /path/to/audio.mp3 --file-id my_audio --output ./outputs/output.rttm
 ```
 
 Tham số quan trọng:
