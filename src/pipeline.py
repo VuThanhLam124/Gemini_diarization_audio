@@ -275,23 +275,70 @@ def call_gemini_stream(
     }
 
     text_chunks: list[str] = []
+    raw_lines: list[str] = []
+    buffer: list[str] = []
+    blocked_reasons: list[str] = []
+    errors: list[str] = []
+
+    def clean_stream_line(line: str) -> str:
+        line = line.strip()
+        if line.startswith("data:"):
+            line = line[len("data:") :].strip()
+        if line.startswith(")]}'"):
+            line = line[len(")]}'") :].strip()
+        return line
+
+    def append_event(event: object) -> None:
+        if isinstance(event, list):
+            for item in event:
+                append_event(item)
+            return
+        if not isinstance(event, dict):
+            return
+        if "error" in event:
+            errors.append(str(event["error"]))
+        prompt_feedback = event.get("promptFeedback")
+        if isinstance(prompt_feedback, dict):
+            reason = prompt_feedback.get("blockReason")
+            if reason:
+                blocked_reasons.append(str(reason))
+        for candidate in event.get("candidates", []):
+            content = candidate.get("content", {})
+            for part in content.get("parts", []):
+                text = part.get("text")
+                if text:
+                    text_chunks.append(text)
+
     with requests.post(url, json=payload, stream=True, timeout=timeout_seconds) as response:
         response.raise_for_status()
         for line in response.iter_lines(decode_unicode=True):
             if not line:
                 continue
-            if line.startswith("data:"):
-                line = line[len("data:") :].strip()
+            raw_lines.append(line)
+            cleaned = clean_stream_line(line)
+            if not cleaned or cleaned == "[DONE]":
+                continue
+            buffer.append(cleaned)
             try:
-                event = json.loads(line)
+                event = json.loads("".join(buffer))
             except json.JSONDecodeError:
                 continue
-            for candidate in event.get("candidates", []):
-                content = candidate.get("content", {})
-                for part in content.get("parts", []):
-                    text = part.get("text")
-                    if text:
-                        text_chunks.append(text)
+            buffer.clear()
+            append_event(event)
+
+    if buffer:
+        try:
+            append_event(json.loads("\n".join(buffer)))
+        except json.JSONDecodeError:
+            pass
+
+    if not text_chunks:
+        if blocked_reasons:
+            LOGGER.warning("Gemini response blocked: %s", ", ".join(sorted(set(blocked_reasons))))
+        if errors:
+            LOGGER.warning("Gemini response errors: %s", "; ".join(errors))
+        if raw_lines:
+            LOGGER.warning("Gemini response had no text parts")
 
     return "".join(text_chunks).strip()
 
