@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -46,6 +47,17 @@ Yêu cầu:
 class Segment:
     start_offset: float
     path: Path
+
+
+@dataclass(frozen=True)
+class UsageSummary:
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    input_cost_usd: float | None = None
+    output_cost_usd: float | None = None
+    total_cost_usd: float | None = None
+    pricing_label: str | None = None
 
 
 def sanitize_file_id(value: str) -> str:
@@ -161,6 +173,73 @@ def build_prompt(file_id: str, segment_offset: float) -> str:
     return PROMPT_TEMPLATE.format(file_id=file_id, segment_offset=f"{segment_offset:.2f}")
 
 
+def estimate_tokens(text: str) -> int:
+    text = text.strip()
+    if not text:
+        return 0
+    return int(math.ceil(len(text) / 4))
+
+
+def resolve_pricing_rates(model: str, total_tokens: int) -> tuple[float, float, str] | None:
+    model_name = model.lower()
+    if "gemini-3-flash-preview" in model_name:
+        return 0.50, 3.0, "gemini-3-flash-preview"
+    if "gemini-3-pro-preview" in model_name:
+        if total_tokens <= 200_000:
+            return 2.0, 12.0, "gemini-3-pro-preview-tier1"
+        return 4.0, 18.0, "gemini-3-pro-preview-tier2"
+    return None
+
+
+def estimate_usage(input_tokens: int, output_tokens: int, model: str) -> UsageSummary:
+    total_tokens = input_tokens + output_tokens
+    rates = resolve_pricing_rates(model, total_tokens)
+    if not rates:
+        return UsageSummary(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+        )
+    input_rate, output_rate, label = rates
+    input_cost = (input_tokens / 1_000_000) * input_rate
+    output_cost = (output_tokens / 1_000_000) * output_rate
+    return UsageSummary(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        input_cost_usd=input_cost,
+        output_cost_usd=output_cost,
+        total_cost_usd=input_cost + output_cost,
+        pricing_label=label,
+    )
+
+
+def format_usage_summary(usage: UsageSummary) -> str:
+    if usage.pricing_label is None:
+        return (
+            "usage input_tokens={input_tokens} output_tokens={output_tokens} "
+            "total_tokens={total_tokens} pricing=unknown"
+        ).format(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+        )
+    return (
+        "usage input_tokens={input_tokens} output_tokens={output_tokens} "
+        "total_tokens={total_tokens} estimated_cost_usd={cost:.6f} pricing={pricing}"
+    ).format(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        total_tokens=usage.total_tokens,
+        cost=usage.total_cost_usd or 0.0,
+        pricing=usage.pricing_label,
+    )
+
+
+def log_usage_summary(usage: UsageSummary) -> None:
+    LOGGER.info(format_usage_summary(usage))
+
+
 def call_gemini_stream(
     api_key: str,
     model: str,
@@ -253,23 +332,28 @@ def run_pipeline(
 ) -> list[str]:
     file_id = sanitize_file_id(file_id)
     output_lines: list[str] = []
+    input_tokens = 0
+    output_tokens = 0
 
     with tempfile.TemporaryDirectory(prefix="segments_") as tmp_dir:
         segments = split_audio(audio_path, segment_seconds, Path(tmp_dir))
         for segment in segments:
             LOGGER.info("Processing segment at %.2fs: %s", segment.start_offset, segment.path)
             prompt = build_prompt(file_id, segment.start_offset)
+            input_tokens += estimate_tokens(prompt)
             response_text = call_gemini_stream(
                 api_key=api_key,
                 model=model,
                 prompt=prompt,
                 audio_path=segment.path,
             )
+            output_tokens += estimate_tokens(response_text)
             output_lines.extend(
                 normalize_output(response_text, file_id=file_id, offset=segment.start_offset)
             )
 
-    return output_lines
+    usage = estimate_usage(input_tokens, output_tokens, model)
+    return output_lines, usage
 
 
 def ensure_logging() -> None:

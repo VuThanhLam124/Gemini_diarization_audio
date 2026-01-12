@@ -4,6 +4,7 @@ from pathlib import Path
 from src.pipeline import (
     ensure_logging,
     format_output,
+    log_usage_summary,
     resolve_api_key,
     resolve_audio_input,
     run_pipeline,
@@ -53,7 +54,7 @@ def main() -> None:
         file_id=args.file_id,
     )
 
-    lines = run_pipeline(
+    lines, usage = run_pipeline(
         api_key=api_key,
         model=args.model,
         audio_path=Path(audio_path),
@@ -66,6 +67,8 @@ def main() -> None:
         Path(args.output).write_text(output_text, encoding="utf-8")
     else:
         print(output_text)
+
+    log_usage_summary(usage)
 
 
 if __name__ == "__main__":

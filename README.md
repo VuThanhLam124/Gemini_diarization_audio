@@ -51,6 +51,21 @@ Tham số quan trọng:
 - `--output-dir`: thư mục lưu audio tải về
 - `--api-key`: dùng khi không set env
 
+## Token và chi phí ước tính
+
+Sau khi chạy sẽ in ra usage ở stderr:
+
+```
+usage input_tokens=1200 output_tokens=3400 total_tokens=4600 estimated_cost_usd=0.010200 pricing=gemini-3-flash-preview
+```
+
+Ước tính token dùng công thức `ceil(len(text) / 4)` cho prompt và output text, không tính audio tokens.
+
+Bảng giá tham chiếu:
+
+- gemini-3-flash-preview: $0.50 input / $3 output (per 1M tokens)
+- gemini-3-pro-preview: $2 / $12 (<200k tokens), $4 / $18 (>=200k tokens)
+
 ## Format output
 
 Nghiêm ngặt - RTTM Hybrid:
