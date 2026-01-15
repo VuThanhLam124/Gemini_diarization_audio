@@ -32,6 +32,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Segment length in seconds for long audio",
     )
     parser.add_argument(
+        "--time-format",
+        choices=["seconds", "hms"],
+        default="hms",
+        help="Timestamp format for output",
+    )
+    parser.add_argument(
         "--output-dir",
         default="data",
         help="Directory for downloaded audio",
@@ -60,6 +66,7 @@ def main() -> None:
         audio_path=Path(audio_path),
         file_id=file_id,
         segment_seconds=args.segment_seconds,
+        time_format=args.time_format,
     )
     output_text = format_output(lines)
 

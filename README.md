@@ -35,18 +35,19 @@ export GEMINI_API_KEY=YOUR_KEY
 YouTube URL:
 
 ```
-python infer.py --youtube-url "https://www.youtube.com/watch?v=VIDEO_ID" --output ./outputs/output.rttm
+python infer.py --youtube-url "https://www.youtube.com/watch?v=VIDEO_ID" --output ./outputs/output.rttm --segment-seconds 120 --model gemini-3-flash-preview
 ```
 
 Audio file local:
 
 ```
-python infer.py --audio-file /path/to/audio.mp3 --file-id my_audio --output ./outputs/output.rttm
+python infer.py --audio-file /path/to/audio.mp3 --file-id my_audio --output ./outputs/output.rttm --segment-seconds 120 --model gemini-3-flash-preview
 ```
 
 Tham số quan trọng:
 
 - `--segment-seconds`: thời lượng mỗi đoạn, mặc định 600
+- `--time-format`: định dạng timestamp, `hms` (mặc định) hoặc `seconds`
 - `--model`: model Vertex AI, mặc định gemini-3-flash-preview
 - `--output-dir`: thư mục lưu audio tải về
 - `--api-key`: dùng khi không set env

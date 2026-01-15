@@ -40,6 +40,7 @@ Yêu cầu:
 - start_time/end_time tính theo thời gian trong đoạn audio hiện tại (0-based).
 - Nếu không có giọng nói, trả về chuỗi rỗng.
 - Nếu không xác định giới tính, ghi "unknown".
+- identifying distinct speakers
 - Skip các đoạn quảng cáo, hát, ... và chỉ tập trung vào phần hội thoại chính.
 - Không skip các đoạn quan trọng, trong lời thoại
 - Không tách diarization theo câu mà theo người nói, ví dụ, nếu người nói ngắt quãng hoặc hết câu, vẫn tiếp tục tracking người đó cho đến khi người khác nói.
@@ -205,6 +206,26 @@ def parse_time_value(value: str) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def seconds_to_hms(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0.0
+    total_ms = int(round(seconds * 1000))
+    total_sec, ms = divmod(total_ms, 1000)
+    hours, rem = divmod(total_sec, 3600)
+    minutes, sec = divmod(rem, 60)
+    if ms:
+        return f"{hours:02d}:{minutes:02d}:{sec:02d}.{ms:03d}"
+    return f"{hours:02d}:{minutes:02d}:{sec:02d}"
+
+
+def format_timestamp(seconds: float, time_format: str) -> str:
+    if time_format == "seconds":
+        return f"{seconds:.2f}"
+    if time_format == "hms":
+        return seconds_to_hms(seconds)
+    raise ValueError(f"Unsupported time format: {time_format}")
 
 
 def normalize_gender(value: str) -> str | None:
@@ -449,7 +470,7 @@ def call_gemini_stream(
     return "".join(text_chunks).strip()
 
 
-def normalize_output(text: str, file_id: str, offset: float) -> list[str]:
+def normalize_output(text: str, file_id: str, offset: float, time_format: str) -> list[str]:
     lines: list[str] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -463,7 +484,12 @@ def normalize_output(text: str, file_id: str, offset: float) -> list[str]:
             continue
         start_val += offset
         end_val += offset
-        line_out = f"{file_id} {speaker} {start_val:.2f} {end_val:.2f} {transcript} {gender}"
+        line_out = (
+            f"{file_id} {speaker} "
+            f"{format_timestamp(start_val, time_format)} "
+            f"{format_timestamp(end_val, time_format)} "
+            f"{transcript} {gender}"
+        )
         lines.append(line_out.strip())
     return lines
 
@@ -475,6 +501,7 @@ def run_pipeline(
     audio_path: Path,
     file_id: str,
     segment_seconds: int,
+    time_format: str,
 ) -> list[str]:
     file_id = sanitize_file_id(file_id)
     output_lines: list[str] = []
@@ -495,7 +522,10 @@ def run_pipeline(
             )
             output_tokens += estimate_tokens(response_text)
             normalized = normalize_output(
-                response_text, file_id=file_id, offset=segment.start_offset
+                response_text,
+                file_id=file_id,
+                offset=segment.start_offset,
+                time_format=time_format,
             )
             if not normalized and response_text.strip():
                 LOGGER.warning("No parsable lines at %.2fs", segment.start_offset)
