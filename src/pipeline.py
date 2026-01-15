@@ -25,22 +25,39 @@ Task: Phân tích file audio, thực hiện Speaker Diarization và Transcriptio
 
 Yêu cầu kỹ thuật:
 - Nhận diện chính xác thời điểm bắt đầu (start_time) và kết thúc (end_time) của mỗi phân đoạn.
-- Gán Speaker ID nhất quán (SPEAKER_01, SPEAKER_02, ...).
 - Nếu có khoảng trống thì bỏ qua, bắt đầu tính start_time từ lúc có giọng nói.
 - Thời gian tính theo giây (float).
 - Chỉ trả về kết quả, không giải thích.
 
 Format Output (Nghiêm ngặt - RTTM Hybrid):
 <file_id> <name or position of who representation> <start_time> <end_time> <transcript> <gender>
-
+Ví dụ: audio123 speaker_1_Nguyễn Văn A_Phó chủ tịch 0.00 5.23 "Xin chào mọi người" nam
+Ví dụ: audio123 speaker_2__đại biểu 5.50 10.75 "Hôm nay chúng ta họp về dự án mới" nữ
+...
 file_id: {file_id}
 segment_offset: {segment_offset}
 Yêu cầu:
 - start_time/end_time tính theo thời gian trong đoạn audio hiện tại (0-based).
 - Nếu không có giọng nói, trả về chuỗi rỗng.
 - Nếu không xác định giới tính, ghi "unknown".
+- Skip các đoạn quảng cáo, hát, ... và chỉ tập trung vào phần hội thoại chính.
+- Không skip các đoạn quan trọng, trong lời thoại
+- Không tách diarization theo câu mà theo người nói, ví dụ, nếu người nói ngắt quãng hoặc hết câu, vẫn tiếp tục tracking người đó cho đến khi người khác nói.
 """
 )
+
+TIME_RE = re.compile(
+    r"(?:^|\s)(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?|\d+(?:\.\d+)?)"
+)
+
+GENDER_TOKENS = {
+    "male": "male",
+    "female": "female",
+    "unknown": "unknown",
+    "nam": "nam",
+    "nu": "nu",
+    "nữ": "nữ",
+}
 
 
 @dataclass(frozen=True)
@@ -171,6 +188,95 @@ def detect_mime_type(path: Path) -> str:
 
 def build_prompt(file_id: str, segment_offset: float) -> str:
     return PROMPT_TEMPLATE.format(file_id=file_id, segment_offset=f"{segment_offset:.2f}")
+
+
+def parse_time_value(value: str) -> float | None:
+    value = value.strip().replace(",", ".")
+    if ":" in value:
+        parts = value.split(":")
+        if len(parts) == 2:
+            minutes, seconds = parts
+            return float(minutes) * 60 + float(seconds)
+        if len(parts) == 3:
+            hours, minutes, seconds = parts
+            return float(hours) * 3600 + float(minutes) * 60 + float(seconds)
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def normalize_gender(value: str) -> str | None:
+    key = value.strip().lower()
+    return GENDER_TOKENS.get(key)
+
+
+def normalize_speaker(value: str) -> str:
+    value = value.strip().strip(":")
+    value = re.sub(r"\s+", "_", value)
+    return value or "SPEAKER_01"
+
+
+def clean_transcript(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+        value = value[1:-1].strip()
+    return value
+
+
+def parse_line(line: str, file_id: str) -> tuple[str, float, float, str, str] | None:
+    parts = line.split()
+    if len(parts) >= 6:
+        start_val = parse_time_value(parts[2])
+        end_val = parse_time_value(parts[3])
+        if start_val is not None and end_val is not None:
+            speaker = normalize_speaker(parts[1])
+            gender = normalize_gender(parts[-1])
+            if gender:
+                transcript = " ".join(parts[4:-1]).strip()
+            else:
+                gender = "unknown"
+                transcript = " ".join(parts[4:]).strip()
+            transcript = clean_transcript(transcript)
+            return speaker, start_val, end_val, transcript, gender
+
+    line = line.replace("—", "-").replace("–", "-")
+    line = re.sub(
+        r"(\d+(?:\.\d+)?|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)[-](\d+(?:\.\d+)?|\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?)",
+        r"\1 \2",
+        line,
+    )
+    matches = list(TIME_RE.finditer(line))
+    if len(matches) < 2:
+        return None
+
+    start_val = parse_time_value(matches[0].group(1))
+    end_val = parse_time_value(matches[1].group(1))
+    if start_val is None or end_val is None:
+        return None
+
+    prefix = line[: matches[0].start()].strip()
+    suffix = line[matches[1].end() :].strip()
+    speaker = ""
+    if prefix:
+        prefix_parts = prefix.split()
+        if prefix_parts and prefix_parts[0] == file_id:
+            speaker = " ".join(prefix_parts[1:]).strip()
+        else:
+            speaker = prefix
+
+    speaker = normalize_speaker(speaker)
+    gender = "unknown"
+    transcript = suffix
+    suffix_parts = suffix.split()
+    if suffix_parts:
+        possible_gender = normalize_gender(suffix_parts[-1])
+        if possible_gender:
+            gender = possible_gender
+            transcript = " ".join(suffix_parts[:-1]).strip()
+    transcript = clean_transcript(transcript)
+    return speaker, start_val, end_val, transcript, gender
 
 
 def estimate_tokens(text: str) -> int:
@@ -349,22 +455,15 @@ def normalize_output(text: str, file_id: str, offset: float) -> list[str]:
         line = raw_line.strip()
         if not line or line.startswith("```"):
             continue
-        parts = line.split()
-        if len(parts) < 6:
+        parsed = parse_line(line, file_id)
+        if not parsed:
             continue
-        speaker = parts[1]
-        start_raw = parts[2]
-        end_raw = parts[3]
-        gender = parts[-1]
-        transcript = " ".join(parts[4:-1]).strip()
-        try:
-            start_val = float(start_raw) + offset
-            end_val = float(end_raw) + offset
-        except ValueError:
+        speaker, start_val, end_val, transcript, gender = parsed
+        if end_val < start_val:
             continue
-        line_out = (
-            f"{file_id} {speaker} {start_val:.2f} {end_val:.2f} {transcript} {gender}"
-        )
+        start_val += offset
+        end_val += offset
+        line_out = f"{file_id} {speaker} {start_val:.2f} {end_val:.2f} {transcript} {gender}"
         lines.append(line_out.strip())
     return lines
 
@@ -395,9 +494,12 @@ def run_pipeline(
                 audio_path=segment.path,
             )
             output_tokens += estimate_tokens(response_text)
-            output_lines.extend(
-                normalize_output(response_text, file_id=file_id, offset=segment.start_offset)
+            normalized = normalize_output(
+                response_text, file_id=file_id, offset=segment.start_offset
             )
+            if not normalized and response_text.strip():
+                LOGGER.warning("No parsable lines at %.2fs", segment.start_offset)
+            output_lines.extend(normalized)
 
     usage = estimate_usage(input_tokens, output_tokens, model)
     return output_lines, usage
