@@ -84,20 +84,24 @@ video123 SPEAKER_02 3.55 6.20 Tôi nghe đây unknown
 
 ## Prompt sử dụng
 
-Role: Bạn là một chuyên gia về Audio Processing và Speech-to-Text.
-Task: Phân tích file audio, thực hiện Speaker Diarization và Transcription đồng thời.
+Role: Bạn là chuyên gia Audio Processing và Speech-to-Text.
+Task: Thực hiện Speaker Diarization và Transcription đồng thời cho đoạn audio hiện tại.
 
-Yêu cầu kỹ thuật:
+Ràng buộc đầu ra:
 
-- Nhận diện chính xác thời điểm bắt đầu (start_time) và kết thúc (end_time) của mỗi phân đoạn.
-- Gán Speaker ID nhất quán (SPEAKER_01, SPEAKER_02, ...).
-- Nếu có khoảng trống thì bỏ qua, bắt đầu tính start_time từ lúc có giọng nói.
+- Chỉ trả về kết quả, không giải thích, không JSON, không markdown.
+- Mỗi dòng theo format: `<file_id> <speaker_name_or_role> <start_time> <end_time> <transcript> <gender>`
+- file_id phải đúng.
+- start_time/end_time là số giây (float) trong đoạn audio hiện tại (0-based).
+- Không bọc transcript trong dấu ngoặc kép.
+- Nếu không xác định giới tính, ghi `unknown`.
 
-Format Output (Nghiêm ngặt - RTTM Hybrid):
+Quy tắc nội dung:
 
-```
-<file_id> <name or position of who representation> <start_time> <end_time> <transcript> <gender>
-```
+- Bỏ qua khoảng lặng, chỉ ghi đoạn có tiếng nói.
+- Bỏ qua quảng cáo, hát, nhạc nền; chỉ tập trung phần hội thoại cuộc họp.
+- Không tách theo câu; gộp liên tục theo người nói cho đến khi người khác nói.
+- Giữ tên/chức vụ speaker nhất quán trong đoạn.
 
 ## API call mẫu
 
@@ -116,4 +120,9 @@ curl --location 'https://aiplatform.googleapis.com/v1/publishers/google/models/g
     }
   ]
 }'
+```
+
+## edit audio file
+```
+python edit_audio.py --input data/audio.mp3 --output-dir outputs/ --segments "0:00-1:30,1:30-3:00" --name "kyhopl11"
 ```

@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -20,30 +21,26 @@ from langchain_core.prompts import PromptTemplate
 LOGGER = logging.getLogger("gemini_diarization")
 
 PROMPT_TEMPLATE = PromptTemplate.from_template(
-    """Role: Bạn là một chuyên gia về Audio Processing và Speech-to-Text.
-Task: Phân tích file audio, thực hiện Speaker Diarization và Transcription đồng thời.
+    """
+You are an expert in Audio Processing and Speech-to-Text.
+Your task is to perform speaker diarization and transcription simultaneously for the current audio segment.
 
-Yêu cầu kỹ thuật:
-- Nhận diện chính xác thời điểm bắt đầu (start_time) và kết thúc (end_time) của mỗi phân đoạn.
-- Nếu có khoảng trống thì bỏ qua, bắt đầu tính start_time từ lúc có giọng nói.
-- Thời gian tính theo giây (float).
-- Chỉ trả về kết quả, không giải thích.
+### Content rules:
+- Skip silence; only include spoken segments.
+- Skip ads, singing, background music; focus only on the meeting dialogue.
+- Do not split by sentence; keep the same speaker continuous until another speaker starts.
+- Keep speaker names/roles consistent within the segment.
 
-Format Output (Nghiêm ngặt - RTTM Hybrid):
-<file_id> <name or position of who representation> <start_time> <end_time> <transcript> <gender>
-Ví dụ: audio123 speaker_1_Nguyễn Văn A_Phó chủ tịch 0.00 5.23 "Xin chào mọi người" nam
-Ví dụ: audio123 speaker_2__đại biểu 5.50 10.75 "Hôm nay chúng ta họp về dự án mới" nữ
-...
-file_id: {file_id}
-segment_offset: {segment_offset}
-Yêu cầu:
-- start_time/end_time tính theo thời gian trong đoạn audio hiện tại (0-based).
-- Nếu không có giọng nói, trả về chuỗi rỗng.
-- Nếu không xác định giới tính, ghi "unknown".
-- identifying distinct speakers
-- Skip các đoạn quảng cáo, hát, ... và chỉ tập trung vào phần hội thoại chính.
-- Không skip các đoạn quan trọng, trong lời thoại
-- Không tách diarization theo câu mà theo người nói, ví dụ, nếu người nói ngắt quãng hoặc hết câu, vẫn tiếp tục tracking người đó cho đến khi người khác nói.
+### Output constraints:
+
+- Return only results; no explanations, no JSON, no markdown.
+- Each line format: <segment_id> <speaker_name_or_role> <gender> <start_time> <end_time> <transcript>
+- segment_id is segment_1, segment_2, ... for each processed audio segment.
+- speaker_name_or_role is the speaker name or role (e.g., SPEAKER_01_Vũ Thành Lâm_Giám Đốc, SPEAKER_02_Nguyễn Văn A_null, ...).
+- start_time/end_time are seconds (float) within the current audio segment (0-based).
+- Do not wrap transcript in quotes.
+- If gender is unknown, output unknown.
+- start_time/end_time is HH:MM:SS format.
 """
 )
 
@@ -373,6 +370,8 @@ def call_gemini_stream(
     prompt: str,
     audio_path: Path,
     timeout_seconds: int = 120,
+    max_retries: int = 3,
+    base_delay: float = 60.0,
 ) -> str:
     url = (
         "https://aiplatform.googleapis.com/v1/publishers/google/models/"
@@ -436,22 +435,41 @@ def call_gemini_stream(
                 if text:
                     text_chunks.append(text)
 
-    with requests.post(url, json=payload, stream=True, timeout=timeout_seconds) as response:
-        response.raise_for_status()
-        for line in response.iter_lines(decode_unicode=True):
-            if not line:
-                continue
-            raw_lines.append(line)
-            cleaned = clean_stream_line(line)
-            if not cleaned or cleaned == "[DONE]":
-                continue
-            buffer.append(cleaned)
-            try:
-                event = json.loads("".join(buffer))
-            except json.JSONDecodeError:
-                continue
-            buffer.clear()
-            append_event(event)
+    for attempt in range(max_retries + 1):
+        try:
+            with requests.post(url, json=payload, stream=True, timeout=timeout_seconds) as response:
+                response.raise_for_status()
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    raw_lines.append(line)
+                    cleaned = clean_stream_line(line)
+                    if not cleaned or cleaned == "[DONE]":
+                        continue
+                    buffer.append(cleaned)
+                    try:
+                        event = json.loads("".join(buffer))
+                    except json.JSONDecodeError:
+                        continue
+                    buffer.clear()
+                    append_event(event)
+            break
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    LOGGER.warning(
+                        "Rate limit (429), retry %d/%d after %.0fs",
+                        attempt + 1, max_retries, delay
+                    )
+                    time.sleep(delay)
+                    text_chunks.clear()
+                    raw_lines.clear()
+                    buffer.clear()
+                    blocked_reasons.clear()
+                    errors.clear()
+                    continue
+            raise
 
     if buffer:
         try:

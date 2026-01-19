@@ -2,3 +2,9 @@
 data/*
 data
 src/__pycache__
+
+outputs/*
+outputs
+
+outputs_diarization/*
+outputs_diarization
