@@ -1,128 +1,63 @@
-# Gemini_diarization_audio
+# Audio Dataset Pipeline
 
-Mục tiêu: nhận transcript từ Youtube video hoặc file audio bằng Gemini Vertex AI API và LangChain.
-
-Input: youtube video url hoặc audio file
-Output: speaker, timestamp, transcript
-
-## Flow
-
-1. Tải audio từ YouTube hoặc dùng file local
-2. Tách audio theo đoạn cố định để tối ưu kích thước request
-3. Gọi Gemini Vertex AI API cho từng đoạn
-4. Chuẩn hóa và cộng offset thời gian cho kết quả
-
-## Yêu cầu
-
-- Python 3.10+
-- ffmpeg, ffprobe
-- API key cho Gemini Vertex AI
+Pipeline giúp đóng gói dữ liệu audio và transcript thành định dạng Hugging Face Dataset để finetune STT/TTS.
 
 ## Cài đặt
 
+```bash
+pip install datasets torchcodec ffmpeg-python
 ```
-pip install -r requirements.txt
+Yêu cầu: `ffmpeg` đã được cài đặt trên hệ thống.
+
+## Hướng dẫn sử dụng (CLI)
+
+### 1. Chuẩn bị file Config (JSON)
+
+Tạo file `config.json` định nghĩa các file audio cần xử lý:
+
+```json
+{
+  "path/to/hatinh1.mp3": {
+    "segments": [
+      ["00:38-00:41"], 
+      ["00:43-01:11"]
+    ],
+    "transcript_path": "path/to/transcript_hatinh1.txt"
+  },
+  "path/to/audio2.mp3": {
+    "segments": [["01:00-01:10"]],
+    "transcript_path": "path/to/transcript_audio2.txt"
+  }
+}
 ```
+**Lưu ý:** File transcript phải chứa câu marker (ví dụ: "Đây là đoạn âm thanh dùng để phân tách") để phân biệt các đoạn.
 
-Thiết lập API key:
+### 2. Chạy lệnh tạo Dataset
 
-```
-export GEMINI_API_KEY=YOUR_KEY
-```
-
-## Chạy diarization + transcription
-
-YouTube URL:
-
-```
-python infer.py --youtube-url "https://www.youtube.com/watch?v=VIDEO_ID" --output ./outputs/output.rttm --segment-seconds 120 --model gemini-3-flash-preview
-```
-
-Audio file local:
-
-```
-python infer.py --audio-file /path/to/audio.mp3 --file-id my_audio --output ./outputs/output.rttm --segment-seconds 120 --model gemini-3-flash-preview
-```
-
-Tham số quan trọng:
-
-- `--segment-seconds`: thời lượng mỗi đoạn, mặc định 600
-- `--time-format`: định dạng timestamp, `hms` (mặc định) hoặc `seconds`
-- `--model`: model Vertex AI, mặc định gemini-3-flash-preview
-- `--output-dir`: thư mục lưu audio tải về
-- `--api-key`: dùng khi không set env
-
-## Token và chi phí ước tính
-
-Sau khi chạy sẽ in ra usage ở stderr:
-
-```
-usage input_tokens=1200 output_tokens=3400 total_tokens=4600 estimated_cost_usd=0.010200 pricing=gemini-3-flash-preview
+```bash
+python run_pipeline.py --input-json config.json --output-dir my_dataset --dataset-name vn_voice
 ```
 
-Ước tính token dùng công thức `ceil(len(text) / 4)` cho prompt và output text, không tính audio tokens.
+### 3. Kết quả (Output)
 
-Bảng giá tham chiếu:
+Trong thư mục `my_dataset/`:
+- `wavs/`: Các file audio đã cắt nhỏ (Format: mono, 16kHz).
+- `metadata.csv`: File chứa thông tin mapping (ID, path, text, duration) để kiểm tra.
+- `hf_dataset/`: Dữ liệu dạng binary Hugging Face, có thể load bằng python:
 
-- gemini-3-flash-preview: $0.50 input / $3 output (per 1M tokens)
-- gemini-3-pro-preview: $2 / $12 (<200k tokens), $4 / $18 (>=200k tokens)
-
-## Format output
-
-Nghiêm ngặt - RTTM Hybrid:
-
-```
-<file_id> <name or position of who representation> <start_time> <end_time> <transcript> <gender>
+```python
+from datasets import load_from_disk
+dataset = load_from_disk("my_dataset/hf_dataset")
+print(dataset[0])
 ```
 
-Ví dụ:
+---
 
-```
-video123 SPEAKER_01 0.52 3.10 Xin chào unknown
-video123 SPEAKER_02 3.55 6.20 Tôi nghe đây unknown
-```
+## (Tools) Các tính năng khác
 
-## Prompt sử dụng
+- **`merge_segments_with_marker`** (trong `edit_audio.py`): Gộp audio và chèn marker để gửi cho Gemini transcribe.
+- **`map_transcript_to_segments`**: Map text trả về từ Gemini vào từng segment gốc.
 
-Role: Bạn là chuyên gia Audio Processing và Speech-to-Text.
-Task: Thực hiện Speaker Diarization và Transcription đồng thời cho đoạn audio hiện tại.
+## (Legacy) Diarization cũ
 
-Ràng buộc đầu ra:
-
-- Chỉ trả về kết quả, không giải thích, không JSON, không markdown.
-- Mỗi dòng theo format: `<file_id> <speaker_name_or_role> <start_time> <end_time> <transcript> <gender>`
-- file_id phải đúng.
-- start_time/end_time là số giây (float) trong đoạn audio hiện tại (0-based).
-- Không bọc transcript trong dấu ngoặc kép.
-- Nếu không xác định giới tính, ghi `unknown`.
-
-Quy tắc nội dung:
-
-- Bỏ qua khoảng lặng, chỉ ghi đoạn có tiếng nói.
-- Bỏ qua quảng cáo, hát, nhạc nền; chỉ tập trung phần hội thoại cuộc họp.
-- Không tách theo câu; gộp liên tục theo người nói cho đến khi người khác nói.
-- Giữ tên/chức vụ speaker nhất quán trong đoạn.
-
-## API call mẫu
-
-```
-curl --location 'https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3-flash-preview:streamGenerateContent?key=MY_KEY' \
---header 'Content-Type: application/json' \
---data '{
-  "contents": [
-    {
-      "role": "user",
-      "parts": [
-        {
-          "text": "Explain how AI works in a few words"
-        }
-      ]
-    }
-  ]
-}'
-```
-
-## edit audio file
-```
-python edit_audio.py --input data/audio.mp3 --output-dir outputs/ --segments "0:00-1:30,1:30-3:00" --name "kyhopl11"
-```
+Tham khảo file `infer.py` để chạy flow cũ (Gemini API Call trực tiếp cho từng đoạn nhỏ).

@@ -1,0 +1,7 @@
+Tiến hành ASR cho audio tiếng Việt tôi gửi, return là text transcript sát với thực tế, càng chính xác càng tốt, không cần timestamp, trong file audio sẽ có các câu Đây là đoạn âm thanh dùng để phân tách, tách ra thành từng câu.
+Ví dụ: 
+Kính thưa quý vị đại biểu, thưa các vị đại biểu Hội đồng.
+
+Đây là đoạn âm thanh dùng để phân tách
+
+Kính thưa chủ tọa kỳ họp, kính...

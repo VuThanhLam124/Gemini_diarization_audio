@@ -8,3 +8,15 @@ outputs
 
 outputs_diarization/*
 outputs_diarization
+
+outputs_dataset/*
+
+outputs_diarization/*
+
+outputs_segment_with_mark/*
+
+*_dataset/*
+
+txt/*
+
+__pycache__/*
