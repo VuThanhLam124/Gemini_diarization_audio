@@ -152,6 +152,7 @@ class PyannoteDiarizer:
 
         self._torch = torch
         self._torchaudio = torchaudio
+        self._enable_torch_checkpoint_compat(torch)
         resolved_device = self._resolve_device(device)
         token = resolve_hf_token(hf_token)
 
@@ -177,6 +178,33 @@ class PyannoteDiarizer:
 
         pipeline.to(resolved_device)
         self.pipeline = pipeline
+
+    @staticmethod
+    def _enable_torch_checkpoint_compat(torch_module) -> None:
+        """
+        PyTorch >=2.6 changes torch.load default `weights_only=True`, which can
+        break some third-party checkpoints used by pyannote/speechbrain.
+        We make loading backward-compatible in this process.
+        """
+        try:
+            torch_module.serialization.add_safe_globals(
+                [torch_module.torch_version.TorchVersion]
+            )
+        except Exception:
+            # Best-effort only, continue with load patch below.
+            pass
+
+        if getattr(torch_module, "_gemini_diarization_torch_load_patched", False):
+            return
+
+        original_load = torch_module.load
+
+        def patched_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return original_load(*args, **kwargs)
+
+        torch_module.load = patched_load
+        torch_module._gemini_diarization_torch_load_patched = True
 
     @staticmethod
     def _load_pipeline_compat(Pipeline, model_id: str, token: str):
