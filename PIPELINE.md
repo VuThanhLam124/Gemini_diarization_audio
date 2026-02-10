@@ -108,6 +108,7 @@ Rules:
 - `diarization_speaker` format `SPEAKER_XX+source_file_stem`.
 - `speaker_id` la global index tren toan bo audio dua vao.
 - Ten speaker that duoc tach rieng trong `speaker_name_mapping.csv`.
+- Neu khong xac dinh duoc `speaker_name`, khong ghi dong do vao `speaker_name_mapping.csv`.
 - Match voi label tay duoc gom theo `diarization_speaker`, chon `speaker_name` co tong overlap cao nhat de tang do on dinh.
 - Segment duoc rang buoc: min `2.5s`, max `20s`.
 - `segment_id = {audio_stem}_{index:04d}`.

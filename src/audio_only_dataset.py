@@ -307,7 +307,10 @@ def write_speaker_name_mapping_csv(output_path: Path, speaker_name_map: dict[str
         writer = csv.writer(csv_file)
         writer.writerow(["diarization_speaker", "speaker_name"])
         for diarization_speaker in sorted(speaker_name_map):
-            writer.writerow([diarization_speaker, speaker_name_map[diarization_speaker]])
+            speaker_name = str(speaker_name_map[diarization_speaker] or "").strip()
+            if not speaker_name:
+                continue
+            writer.writerow([diarization_speaker, speaker_name])
 
 
 def create_audio_only_dataset(
@@ -581,11 +584,7 @@ def create_audio_only_dataset(
             )
 
     speaker_name_map_path = output_dir / "speaker_name_mapping.csv"
-    complete_speaker_name_map = {
-        diarization_speaker: speaker_name_map.get(diarization_speaker, "")
-        for diarization_speaker in all_diarization_labels
-    }
-    write_speaker_name_mapping_csv(speaker_name_map_path, complete_speaker_name_map)
+    write_speaker_name_mapping_csv(speaker_name_map_path, speaker_name_map)
 
     try:
         from datasets import Audio, Dataset, Features, Value
@@ -625,11 +624,13 @@ def create_audio_only_dataset(
     multi_diar_names_global = sum(
         1 for diar_labels in global_name_to_diarization.values() if len(diar_labels) > 1
     )
+    unmapped_diarization_speakers = max(0, len(all_diarization_labels) - len(speaker_name_map))
     print(
         f"Summary: total_segments={total_segments} matched={total_matched} "
         f"fallback={total_fallback} dropped_short={total_dropped_short} "
         f"global_speakers={len(global_speaker_ids)} conflicted_diar={total_conflicted_diar} "
-        f"multi_diar_name={total_multi_diar_name} multi_diar_name_global={multi_diar_names_global}"
+        f"multi_diar_name={total_multi_diar_name} multi_diar_name_global={multi_diar_names_global} "
+        f"unmapped_diarization_speakers={unmapped_diarization_speakers}"
     )
 
     return dataset

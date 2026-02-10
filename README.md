@@ -101,6 +101,7 @@ Rule:
 - `diarization_speaker` duoc barcode theo format `SPEAKER_XX+source_file_stem`.
 - `speaker_id` la global ID tren toan bo audio truyen vao.
 - Ten that cua speaker duoc tach rieng trong `speaker_name_mapping.csv` (`diarization_speaker`, `speaker_name`).
+- Neu khong xac dinh duoc `speaker_name`, dong tuong ung se khong duoc ghi vao `speaker_name_mapping.csv`.
 - Mapping speaker tu label tay duoc chuan hoa theo `diarization_speaker` (chon speaker_name co tong overlap cao nhat) de giam map sai.
 - Segment duoc gioi han: `min 2.5s`, `max 20s`; phan ngan hon 2.5s se bi bo.
 - Cột `audio` trong `hf_dataset` được cast `Audio(..., decode=False)` để tương thích Kaggle/torchcodec.

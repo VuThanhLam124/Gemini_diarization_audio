@@ -68,6 +68,7 @@ Quy uoc:
 - `segment_id = {audio_stem}_{index:04d}`
 - `diarization_speaker = SPEAKER_XX+source_file_stem`
 - `speaker_name_mapping.csv` luu cap (`diarization_speaker`, `speaker_name`) de doi chieu
+- Neu khong xac dinh duoc `speaker_name` thi khong ghi dong mapping do vao CSV
 - segment max `20s`, min `2.5s`, ngan hon bi loai
 
 ## 5) Tham so mac dinh quan trong
