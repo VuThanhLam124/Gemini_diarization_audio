@@ -52,15 +52,18 @@ flowchart TD
 ## Audio-only data flow
 
 1. `run_pipeline.py` chay mode moi khi **khong co** `--input-json`.
-2. Doc audio tu `--audio-dir` theo `--audio-pattern`.
+2. Doc audio tu `--audio-dir` theo `--audio-pattern` hoac tu list `--audio-files`.
 3. Khoi tao pyannote 1 lan, diarize tung file, merge segment.
 4. Tinh `audio_offset_map` tu tong duration cac part cung group (`^(.+)_(\d+)$`).
 5. Match speaker theo timeline CSV:
    - `abs_start = start_sec + offset`
    - `abs_end = end_sec + offset`
    - overlap >= `--min-overlap` (default 0.70)
-6. Cat tung segment thanh `wavs/*.wav`.
-7. Xuat `metadata.csv` schema toi gian + `hf_dataset/`.
+6. Chia segment dai > 20s thanh nhieu doan; bo doan < 2.5s.
+7. Cat tung segment thanh `wavs/*.wav`.
+8. Gan `speaker_id` global tren toan bo batch audio.
+9. Tach mapping ten speaker ra file rieng `speaker_name_mapping.csv`.
+10. Xuat `metadata.csv` + `hf_dataset/`.
 
 ## Command
 
@@ -68,6 +71,7 @@ flowchart TD
 ```bash
 python run_pipeline.py \
   --audio-dir outputs \
+  --audio-files '["hatinh1_1.mp3","hatinh1_2.mp3"]' \
   --output-dir my_dataset \
   --dataset-name vn_voice \
   --label-csv data_label_by_hand.csv
@@ -91,22 +95,21 @@ python run_pipeline.py \
 - `duration`
 - `start_sec`
 - `end_sec`
-- `abs_start_sec`
-- `abs_end_sec`
+- `start_sec_glob` (HH:MM:SS trong audio tong)
+- `end_sec_glob` (HH:MM:SS trong audio tong)
 - `source_file`
 - `diarization_speaker`
-- `speaker_label`
 - `speaker_id`
-- `speaker_name`
 - `speaker_gender`
 - `speaker_region`
-- `speaker_position`
-- `overlap_ratio`
 
 Rules:
 - Khong su dung transcript trong mode moi.
-- `speaker_label = speaker_name` neu map CSV thanh cong; nguoc lai la nhan diarization.
-- `speaker_id = 0` neu unknown.
+- `diarization_speaker` format `SPEAKER_XX+source_file_stem`.
+- `speaker_id` la global index tren toan bo audio dua vao.
+- Ten speaker that duoc tach rieng trong `speaker_name_mapping.csv`.
+- Match voi label tay duoc gom theo `diarization_speaker`, chon `speaker_name` co tong overlap cao nhat de tang do on dinh.
+- Segment duoc rang buoc: min `2.5s`, max `20s`.
 - `segment_id = {audio_stem}_{index:04d}`.
 
 ## File chinh

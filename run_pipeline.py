@@ -1,4 +1,5 @@
 import argparse
+import ast
 import json
 import re
 import sys
@@ -154,6 +155,43 @@ def _resolve_label_csv_path(label_csv_arg: str, base_dir: Path | None = None) ->
     return None
 
 
+def _parse_audio_files_arg(audio_files_arg: str | None) -> list[str]:
+    """Parse --audio-files from JSON list / Python list / comma-separated string."""
+    if not audio_files_arg:
+        return []
+
+    value = audio_files_arg.strip()
+    if not value:
+        return []
+
+    parsed: list[str] | None = None
+    if value.startswith("["):
+        try:
+            loaded = json.loads(value)
+            if isinstance(loaded, list):
+                parsed = [str(item).strip() for item in loaded if str(item).strip()]
+            else:
+                raise ValueError("--audio-files list format is invalid")
+        except json.JSONDecodeError:
+            try:
+                loaded = ast.literal_eval(value)
+            except Exception as exc:
+                raise ValueError(
+                    "--audio-files must be JSON/Python list or comma-separated string"
+                ) from exc
+
+            if isinstance(loaded, list):
+                parsed = [str(item).strip() for item in loaded if str(item).strip()]
+            else:
+                raise ValueError("--audio-files list format is invalid")
+    else:
+        parsed = [item.strip() for item in value.split(",") if item.strip()]
+
+    if not parsed:
+        raise ValueError("--audio-files is empty after parsing")
+    return parsed
+
+
 def run_legacy_mode(args: argparse.Namespace) -> int:
     json_path = Path(args.input_json)
     if not json_path.exists():
@@ -252,8 +290,26 @@ def run_legacy_mode(args: argparse.Namespace) -> int:
 
 
 def run_audio_only_mode(args: argparse.Namespace) -> int:
-    if not args.audio_dir:
-        print("Error: --audio-dir is required when --input-json is not provided")
+    try:
+        audio_files = _parse_audio_files_arg(args.audio_files)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
+
+    if not args.audio_dir and not audio_files:
+        print("Error: provide --audio-dir or --audio-files when --input-json is not provided")
+        return 1
+
+    if args.min_segment_duration <= 0:
+        print("Error: --min-segment-duration must be > 0")
+        return 1
+
+    if args.max_segment_duration <= 0:
+        print("Error: --max-segment-duration must be > 0")
+        return 1
+
+    if args.max_segment_duration < args.min_segment_duration:
+        print("Error: --max-segment-duration must be >= --min-segment-duration")
         return 1
 
     try:
@@ -262,12 +318,13 @@ def run_audio_only_mode(args: argparse.Namespace) -> int:
         print(f"Error: unable to load audio-only pipeline: {exc}")
         return 1
 
-    audio_dir = Path(args.audio_dir)
+    audio_dir = Path(args.audio_dir) if args.audio_dir else None
     label_csv_path = _resolve_label_csv_path(args.label_csv)
 
     try:
         create_audio_only_dataset(
             audio_dir=audio_dir,
+            audio_files=audio_files,
             output_dir=Path(args.output_dir),
             dataset_name=args.dataset_name,
             label_csv_path=label_csv_path,
@@ -280,6 +337,7 @@ def run_audio_only_mode(args: argparse.Namespace) -> int:
             min_cluster_size=args.min_cluster_size,
             merge_gap=args.merge_gap,
             min_segment_duration=args.min_segment_duration,
+            max_segment_duration=args.max_segment_duration,
             min_overlap=args.min_overlap,
         )
     except Exception as exc:
@@ -316,7 +374,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Audio-only mode arguments
     parser.add_argument(
         "--audio-dir",
-        help="Thu muc audio input cho mode audio-only (required when --input-json is not set)",
+        help="Thu muc audio input cho mode audio-only (required neu khong dung --audio-files)",
+    )
+    parser.add_argument(
+        "--audio-files",
+        default=None,
+        help=(
+            "Danh sach audio cu the: JSON/Python list hoac comma-separated, "
+            "vd '[\"a.mp3\", \"b.mp3\"]'"
+        ),
     )
     parser.add_argument(
         "--audio-pattern",
@@ -363,8 +429,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-segment-duration",
         type=float,
-        default=0.5,
-        help="Do dai toi thieu cua segment sau merge (giay)",
+        default=2.5,
+        help="Do dai toi thieu cua segment sau merge/split (giay). Segment ngan hon se bi bo",
+    )
+    parser.add_argument(
+        "--max-segment-duration",
+        type=float,
+        default=20.0,
+        help="Do dai toi da cua segment (giay). Segment dai hon se duoc cat nho",
     )
     parser.add_argument(
         "--min-overlap",

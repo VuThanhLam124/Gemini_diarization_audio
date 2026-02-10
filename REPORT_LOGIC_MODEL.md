@@ -14,7 +14,7 @@
 ### A. Audio-only mode (mac dinh moi)
 - Trigger: khong truyen `--input-json`.
 - Input:
-  - `--audio-dir` (batch audio)
+  - `--audio-dir` (batch audio) hoac `--audio-files` (list audio cu the)
   - `--label-csv` (optional)
   - HF token (CLI/env/file)
 - Core:
@@ -42,10 +42,12 @@ Cho moi segment:
 Speaker matching:
 - `overlap_ratio = intersection([abs_start_sec, abs_end_sec], [spk_start, spk_end]) / segment_duration`
 - Match neu `overlap_ratio >= min_overlap` (default `0.70`)
+- Neu cung `diarization_speaker` match nhieu `speaker_name`, chon `speaker_name` co tong overlap lon nhat (canonical mapping)
 
 Fallback:
 - Neu khong match duoc CSV timeline => giu `diarization_speaker`
-- `speaker_id = 0`, `speaker_name = ""`
+- Ten speaker that (neu co) khong luu trong metadata ma luu file mapping rieng
+- `speaker_id` duoc cap global theo toan bo batch audio
 
 ## 4) Output schema mode moi
 
@@ -54,33 +56,32 @@ Fallback:
 - `duration`
 - `start_sec`
 - `end_sec`
-- `abs_start_sec`
-- `abs_end_sec`
+- `start_sec_glob` (HH:MM:SS trong audio tong sau cong offset)
+- `end_sec_glob` (HH:MM:SS trong audio tong sau cong offset)
 - `source_file`
 - `diarization_speaker`
-- `speaker_label`
 - `speaker_id`
-- `speaker_name`
 - `speaker_gender`
 - `speaker_region`
-- `speaker_position`
-- `overlap_ratio`
 
 Quy uoc:
 - `segment_id = {audio_stem}_{index:04d}`
-- `speaker_label = speaker_name` neu match CSV thanh cong, nguoc lai `diarization_speaker`
+- `diarization_speaker = SPEAKER_XX+source_file_stem`
+- `speaker_name_mapping.csv` luu cap (`diarization_speaker`, `speaker_name`) de doi chieu
+- segment max `20s`, min `2.5s`, ngan hon bi loai
 
 ## 5) Tham so mac dinh quan trong
 
 - `merge_gap = 2.0s`
-- `min_segment_duration = 0.5s`
+- `min_segment_duration = 2.5s`
+- `max_segment_duration = 20.0s`
 - `min_overlap = 0.70`
 - backend diarization: `pyannote/speaker-diarization-3.1`
 
 ## 6) Error handling
 
 Mode moi canh bao ro:
-- thieu `--audio-dir`
+- thieu `--audio-dir` va `--audio-files`
 - thieu ffmpeg
 - khong co file audio phu hop pattern
 - thieu HF token / chua cai pyannote dependencies

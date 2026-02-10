@@ -5,9 +5,9 @@ import re
 import subprocess
 from pathlib import Path
 
-from edit_audio import match_segment_to_speaker, parse_speaker_info_from_label
+from edit_audio import parse_speaker_info_from_label
 
-from .pyannote_diarization import PyannoteDiarizer, ensure_ffmpeg_exists
+from .pyannote_diarization import DiarizationSegment, PyannoteDiarizer, ensure_ffmpeg_exists
 
 
 def get_audio_duration(audio_path: Path) -> float:
@@ -51,6 +51,75 @@ def discover_audio_files(audio_dir: Path, audio_pattern: str) -> list[Path]:
     )
 
 
+def resolve_audio_files_from_list(
+    audio_files: list[str],
+    audio_dir: Path | None,
+) -> list[Path]:
+    """Resolve explicit audio list with optional base directory."""
+    if not audio_files:
+        raise RuntimeError("Empty audio files list.")
+
+    resolved: list[Path] = []
+    missing: list[str] = []
+    seen: set[str] = set()
+
+    for item in audio_files:
+        raw = item.strip()
+        if not raw:
+            continue
+
+        file_path = Path(raw).expanduser()
+        candidates: list[Path] = []
+        if file_path.is_absolute():
+            candidates.append(file_path)
+        else:
+            if audio_dir:
+                candidates.append((audio_dir / file_path).expanduser())
+            candidates.append(file_path)
+
+        matched: Path | None = None
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                matched = candidate.resolve()
+                break
+
+        if not matched:
+            missing.append(raw)
+            continue
+
+        key = str(matched)
+        if key not in seen:
+            seen.add(key)
+            resolved.append(matched)
+
+    if missing:
+        raise RuntimeError(f"Audio file(s) not found: {', '.join(missing)}")
+
+    if not resolved:
+        raise RuntimeError("No valid audio files found from --audio-files.")
+
+    return resolved
+
+
+def resolve_audio_inputs(
+    *,
+    audio_dir: Path | None,
+    audio_pattern: str,
+    audio_files: list[str] | None,
+) -> list[Path]:
+    """Resolve audio inputs from explicit list or directory scan."""
+    if audio_files:
+        return resolve_audio_files_from_list(audio_files, audio_dir)
+
+    if not audio_dir:
+        raise RuntimeError("audio_dir is required when --audio-files is not provided.")
+
+    if not audio_dir.exists() or not audio_dir.is_dir():
+        raise RuntimeError(f"Audio directory not found: {audio_dir}")
+
+    return discover_audio_files(audio_dir=audio_dir, audio_pattern=audio_pattern)
+
+
 def _extract_audio_group(stem: str) -> tuple[str, int]:
     match = re.match(r"^(.+)_(\d+)$", stem)
     if match:
@@ -73,7 +142,7 @@ def compute_audio_offsets(audio_files: list[Path]) -> dict[str, float]:
         grouped.setdefault(group_id, []).append((part_num, audio_path))
 
     offsets: dict[str, float] = {}
-    for group_id, parts in grouped.items():
+    for _, parts in grouped.items():
         parts.sort(key=lambda item: (item[0], item[1].name))
         cumulative = 0.0
         for _, audio_path in parts:
@@ -121,12 +190,6 @@ def cut_segment_to_wav(
     raise RuntimeError(f"Failed to cut segment {output_path.name}: {stderr}")
 
 
-def _format_overlap(value: float) -> str:
-    if value <= 0:
-        return ""
-    return f"{value:.4f}"
-
-
 def _load_speaker_info(label_csv_path: Path | None) -> dict[str, list[dict]]:
     if not label_csv_path:
         return {}
@@ -140,9 +203,117 @@ def _load_speaker_info(label_csv_path: Path | None) -> dict[str, list[dict]]:
     return mapping
 
 
+def _build_barcoded_speaker(diarization_speaker: str, source_stem: str) -> str:
+    source_code = re.sub(r"[^A-Za-z0-9_-]", "_", source_stem)
+    base = diarization_speaker.split("+", 1)[0]
+    return f"{base}+{source_code}"
+
+
+def _format_hhmmss(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _calc_overlap_seconds(
+    seg_start: float,
+    seg_end: float,
+    spk_start: float,
+    spk_end: float,
+) -> float:
+    overlap_start = max(seg_start, spk_start)
+    overlap_end = min(seg_end, spk_end)
+    return max(0.0, overlap_end - overlap_start)
+
+
+def _find_best_speaker_match(
+    segment_start_sec: float,
+    segment_end_sec: float,
+    speaker_list: list[dict],
+    *,
+    min_overlap: float,
+) -> tuple[dict | None, float, float]:
+    """Find best speaker by overlap ratio, return (speaker, ratio, overlap_seconds)."""
+    segment_duration = segment_end_sec - segment_start_sec
+    if segment_duration <= 0:
+        return None, 0.0, 0.0
+
+    best_speaker = None
+    best_ratio = 0.0
+    best_overlap = 0.0
+
+    for spk_info in speaker_list:
+        spk_start = float(spk_info.get("start_sec", 0.0) or 0.0)
+        spk_end = float(spk_info.get("end_sec", 0.0) or 0.0)
+        if spk_start >= spk_end:
+            continue
+
+        overlap_seconds = _calc_overlap_seconds(
+            segment_start_sec,
+            segment_end_sec,
+            spk_start,
+            spk_end,
+        )
+        if overlap_seconds <= 0:
+            continue
+
+        ratio = overlap_seconds / segment_duration
+        better_ratio = ratio > best_ratio
+        better_tie = ratio == best_ratio and overlap_seconds > best_overlap
+        if better_ratio or better_tie:
+            best_speaker = spk_info
+            best_ratio = ratio
+            best_overlap = overlap_seconds
+
+    if best_speaker and best_ratio >= min_overlap:
+        return best_speaker, best_ratio, best_overlap
+    return None, 0.0, 0.0
+
+
+def apply_segment_length_constraints(
+    segments: list[DiarizationSegment],
+    *,
+    min_segment_duration: float,
+    max_segment_duration: float,
+) -> tuple[list[DiarizationSegment], int]:
+    """Split long segments and drop short chunks."""
+    constrained: list[DiarizationSegment] = []
+    dropped_short = 0
+
+    for segment in segments:
+        cursor = segment.start_sec
+        while cursor < segment.end_sec:
+            chunk_end = min(cursor + max_segment_duration, segment.end_sec)
+            duration = chunk_end - cursor
+            if duration >= min_segment_duration:
+                constrained.append(
+                    DiarizationSegment(
+                        start_sec=cursor,
+                        end_sec=chunk_end,
+                        diarization_speaker=segment.diarization_speaker,
+                    )
+                )
+            else:
+                dropped_short += 1
+            cursor = chunk_end
+
+    return constrained, dropped_short
+
+
+def write_speaker_name_mapping_csv(output_path: Path, speaker_name_map: dict[str, str]) -> None:
+    with open(output_path, "w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["diarization_speaker", "speaker_name"])
+        for diarization_speaker in sorted(speaker_name_map):
+            writer.writerow([diarization_speaker, speaker_name_map[diarization_speaker]])
+
+
 def create_audio_only_dataset(
     *,
-    audio_dir: Path,
+    audio_dir: Path | None,
+    audio_files: list[str] | None,
     output_dir: Path,
     dataset_name: str,
     label_csv_path: Path | None,
@@ -155,18 +326,20 @@ def create_audio_only_dataset(
     min_cluster_size: int | None,
     merge_gap: float,
     min_segment_duration: float,
+    max_segment_duration: float,
     min_overlap: float,
 ):
     """Run audio-only diarization pipeline and export dataset artifacts."""
     ensure_ffmpeg_exists()
 
-    if not audio_dir.exists() or not audio_dir.is_dir():
-        raise RuntimeError(f"Audio directory not found: {audio_dir}")
+    audio_paths = resolve_audio_inputs(
+        audio_dir=audio_dir,
+        audio_pattern=audio_pattern,
+        audio_files=audio_files,
+    )
+    print(f"Discovered {len(audio_paths)} audio files")
 
-    audio_files = discover_audio_files(audio_dir=audio_dir, audio_pattern=audio_pattern)
-    print(f"Discovered {len(audio_files)} audio files")
-
-    audio_offset_map = compute_audio_offsets(audio_files)
+    audio_offset_map = compute_audio_offsets(audio_paths)
     print("Computed audio offsets")
 
     speaker_info_map = _load_speaker_info(label_csv_path)
@@ -185,30 +358,45 @@ def create_audio_only_dataset(
     wavs_dir.mkdir(parents=True, exist_ok=True)
 
     metadata_rows: list[dict] = []
+    speaker_name_map: dict[str, str] = {}
+    all_diarization_labels: set[str] = set()
+    global_name_to_diarization: dict[str, set[str]] = {}
+    global_speaker_ids: dict[str, int] = {}
+    next_global_speaker_id = 1
+
     total_segments = 0
     total_matched = 0
     total_fallback = 0
+    total_dropped_short = 0
+    total_conflicted_diar = 0
+    total_multi_diar_name = 0
 
-    for audio_path in audio_files:
+    for audio_path in audio_paths:
         segments = diarizer.diarize_file(
             audio_path,
             merge_gap=merge_gap,
             min_segment_duration=min_segment_duration,
         )
+        segments, dropped_short = apply_segment_length_constraints(
+            segments,
+            min_segment_duration=min_segment_duration,
+            max_segment_duration=max_segment_duration,
+        )
 
-        file_matched = 0
-        file_fallback = 0
         source_file = audio_path.name
         source_stem = audio_path.stem
         file_id = _extract_file_id(source_stem)
         speaker_list = speaker_info_map.get(file_id, [])
         offset = audio_offset_map.get(str(audio_path.resolve()), 0.0)
+        file_rows: list[dict] = []
+        overlap_scores_by_diarization: dict[str, dict[str, float]] = {}
+        profile_by_diarization_and_name: dict[str, dict[str, dict]] = {}
 
         for idx, segment in enumerate(segments):
             start_sec = segment.start_sec
             end_sec = segment.end_sec
             duration = end_sec - start_sec
-            if duration <= 0:
+            if duration < min_segment_duration:
                 continue
 
             segment_id = f"{source_stem}_{idx:04d}"
@@ -222,60 +410,130 @@ def create_audio_only_dataset(
 
             abs_start_sec = start_sec + offset
             abs_end_sec = end_sec + offset
+            diarization_speaker = _build_barcoded_speaker(segment.diarization_speaker, source_stem)
+            all_diarization_labels.add(diarization_speaker)
 
-            speaker_id = 0
             speaker_name = ""
             speaker_gender = ""
             speaker_region = ""
-            speaker_position = ""
-            overlap_ratio = 0.0
+            overlap_seconds = 0.0
 
             if speaker_list:
-                matched_speaker, ratio = match_segment_to_speaker(
+                matched_speaker, _, overlap_seconds = _find_best_speaker_match(
                     abs_start_sec,
                     abs_end_sec,
                     speaker_list,
-                    threshold=min_overlap,
+                    min_overlap=min_overlap,
                 )
                 if matched_speaker:
-                    speaker_id = int(matched_speaker.get("speaker_id", 0) or 0)
                     speaker_name = str(matched_speaker.get("speaker_name", "") or "")
                     speaker_gender = str(matched_speaker.get("speaker_gender", "") or "")
                     speaker_region = str(matched_speaker.get("speaker_region", "") or "")
-                    speaker_position = str(matched_speaker.get("speaker_position", "") or "")
-                    overlap_ratio = float(ratio)
 
             if speaker_name:
-                speaker_label = speaker_name
-                file_matched += 1
-            else:
-                speaker_label = segment.diarization_speaker
-                file_fallback += 1
+                score_map = overlap_scores_by_diarization.setdefault(diarization_speaker, {})
+                score_map[speaker_name] = score_map.get(speaker_name, 0.0) + overlap_seconds
 
-            metadata_rows.append(
+                profile_map = profile_by_diarization_and_name.setdefault(diarization_speaker, {})
+                current_profile = profile_map.get(speaker_name)
+                if not current_profile or overlap_seconds > float(
+                    current_profile.get("overlap_seconds", 0.0)
+                ):
+                    profile_map[speaker_name] = {
+                        "speaker_gender": speaker_gender,
+                        "speaker_region": speaker_region,
+                        "overlap_seconds": overlap_seconds,
+                    }
+
+            file_rows.append(
                 {
                     "segment_id": segment_id,
                     "audio": str(output_wav.resolve()),
                     "duration": duration,
                     "start_sec": start_sec,
                     "end_sec": end_sec,
-                    "abs_start_sec": abs_start_sec,
-                    "abs_end_sec": abs_end_sec,
+                    "start_sec_glob": _format_hhmmss(abs_start_sec),
+                    "end_sec_glob": _format_hhmmss(abs_end_sec),
                     "source_file": source_file,
-                    "diarization_speaker": segment.diarization_speaker,
-                    "speaker_label": speaker_label,
-                    "speaker_id": speaker_id,
-                    "speaker_name": speaker_name,
+                    "diarization_speaker": diarization_speaker,
                     "speaker_gender": speaker_gender,
                     "speaker_region": speaker_region,
-                    "speaker_position": speaker_position,
-                    "overlap_ratio": overlap_ratio,
                 }
             )
 
-        file_segments = file_matched + file_fallback
+        canonical_name_by_diarization: dict[str, str] = {}
+        canonical_profile_by_diarization: dict[str, dict] = {}
+        file_conflicted_diar = 0
+
+        for diarization_speaker, score_map in overlap_scores_by_diarization.items():
+            if len(score_map) > 1:
+                file_conflicted_diar += 1
+            speaker_name = max(score_map.items(), key=lambda item: (item[1], item[0]))[0]
+            canonical_name_by_diarization[diarization_speaker] = speaker_name
+            canonical_profile_by_diarization[diarization_speaker] = (
+                profile_by_diarization_and_name.get(diarization_speaker, {}).get(speaker_name, {})
+            )
+
+        file_name_to_diarization: dict[str, set[str]] = {}
+        for diarization_speaker, speaker_name in canonical_name_by_diarization.items():
+            normalized_name = speaker_name.strip().lower()
+            if normalized_name:
+                file_name_to_diarization.setdefault(normalized_name, set()).add(diarization_speaker)
+        file_multi_diar_name = sum(
+            1 for diar_labels in file_name_to_diarization.values() if len(diar_labels) > 1
+        )
+
+        file_matched = 0
+        file_fallback = 0
+        for row in file_rows:
+            diarization_speaker = row["diarization_speaker"]
+            canonical_name = canonical_name_by_diarization.get(diarization_speaker, "")
+
+            if canonical_name:
+                normalized_name = canonical_name.strip().lower()
+                speaker_key = f"name:{normalized_name}"
+                speaker_name_map[diarization_speaker] = canonical_name
+                global_name_to_diarization.setdefault(normalized_name, set()).add(diarization_speaker)
+
+                profile = canonical_profile_by_diarization.get(diarization_speaker, {})
+                speaker_gender = str(profile.get("speaker_gender", "") or row["speaker_gender"] or "")
+                speaker_region = str(profile.get("speaker_region", "") or row["speaker_region"] or "")
+                file_matched += 1
+            else:
+                speaker_key = f"diarization:{diarization_speaker}"
+                speaker_gender = str(row["speaker_gender"] or "")
+                speaker_region = str(row["speaker_region"] or "")
+                file_fallback += 1
+
+            if speaker_key not in global_speaker_ids:
+                global_speaker_ids[speaker_key] = next_global_speaker_id
+                next_global_speaker_id += 1
+
+            metadata_rows.append(
+                {
+                    "segment_id": row["segment_id"],
+                    "audio": row["audio"],
+                    "duration": row["duration"],
+                    "start_sec": row["start_sec"],
+                    "end_sec": row["end_sec"],
+                    "start_sec_glob": row["start_sec_glob"],
+                    "end_sec_glob": row["end_sec_glob"],
+                    "source_file": row["source_file"],
+                    "diarization_speaker": diarization_speaker,
+                    "speaker_id": global_speaker_ids[speaker_key],
+                    "speaker_gender": speaker_gender,
+                    "speaker_region": speaker_region,
+                }
+            )
+
+        file_segments = len(file_rows)
+        total_dropped_short += dropped_short
+        total_conflicted_diar += file_conflicted_diar
+        total_multi_diar_name += file_multi_diar_name
         print(
-            f"{source_file}: segments={file_segments} matched={file_matched} fallback={file_fallback}"
+            f"{source_file}: segments={file_segments} matched={file_matched} "
+            f"fallback={file_fallback} dropped_short={dropped_short} "
+            f"conflicted_diar={file_conflicted_diar} multi_diar_name={file_multi_diar_name}"
         )
 
         total_segments += file_segments
@@ -291,17 +549,13 @@ def create_audio_only_dataset(
         "duration",
         "start_sec",
         "end_sec",
-        "abs_start_sec",
-        "abs_end_sec",
+        "start_sec_glob",
+        "end_sec_glob",
         "source_file",
         "diarization_speaker",
-        "speaker_label",
         "speaker_id",
-        "speaker_name",
         "speaker_gender",
         "speaker_region",
-        "speaker_position",
-        "overlap_ratio",
     ]
 
     metadata_csv_path = output_dir / "metadata.csv"
@@ -316,19 +570,22 @@ def create_audio_only_dataset(
                     f"{row['duration']:.6f}",
                     f"{row['start_sec']:.6f}",
                     f"{row['end_sec']:.6f}",
-                    f"{row['abs_start_sec']:.6f}",
-                    f"{row['abs_end_sec']:.6f}",
+                    row["start_sec_glob"],
+                    row["end_sec_glob"],
                     row["source_file"],
                     row["diarization_speaker"],
-                    row["speaker_label"],
                     row["speaker_id"],
-                    row["speaker_name"],
                     row["speaker_gender"],
                     row["speaker_region"],
-                    row["speaker_position"],
-                    _format_overlap(row["overlap_ratio"]),
                 ]
             )
+
+    speaker_name_map_path = output_dir / "speaker_name_mapping.csv"
+    complete_speaker_name_map = {
+        diarization_speaker: speaker_name_map.get(diarization_speaker, "")
+        for diarization_speaker in all_diarization_labels
+    }
+    write_speaker_name_mapping_csv(speaker_name_map_path, complete_speaker_name_map)
 
     try:
         from datasets import Audio, Dataset, Features, Value
@@ -344,32 +601,35 @@ def create_audio_only_dataset(
             "duration": Value("float32"),
             "start_sec": Value("float32"),
             "end_sec": Value("float32"),
-            "abs_start_sec": Value("float32"),
-            "abs_end_sec": Value("float32"),
+            "start_sec_glob": Value("string"),
+            "end_sec_glob": Value("string"),
             "source_file": Value("string"),
             "diarization_speaker": Value("string"),
-            "speaker_label": Value("string"),
             "speaker_id": Value("int32"),
-            "speaker_name": Value("string"),
             "speaker_gender": Value("string"),
             "speaker_region": Value("string"),
-            "speaker_position": Value("string"),
-            "overlap_ratio": Value("float32"),
         }
     )
 
     data_dict = {column: [row[column] for row in metadata_rows] for column in metadata_columns}
     dataset = Dataset.from_dict(data_dict, features=features)
-    dataset = dataset.cast_column("audio", Audio(sampling_rate=16000))
+    dataset = dataset.cast_column("audio", Audio(sampling_rate=16000, decode=False))
 
     dataset_save_path = output_dir / "hf_dataset"
     dataset.save_to_disk(dataset_save_path)
 
     print(f"Dataset name: {dataset_name}")
     print(f"Saved metadata: {metadata_csv_path}")
+    print(f"Saved speaker mapping: {speaker_name_map_path}")
     print(f"Saved HF dataset: {dataset_save_path}")
+    multi_diar_names_global = sum(
+        1 for diar_labels in global_name_to_diarization.values() if len(diar_labels) > 1
+    )
     print(
-        f"Summary: total_segments={total_segments} matched={total_matched} fallback={total_fallback}"
+        f"Summary: total_segments={total_segments} matched={total_matched} "
+        f"fallback={total_fallback} dropped_short={total_dropped_short} "
+        f"global_speakers={len(global_speaker_ids)} conflicted_diar={total_conflicted_diar} "
+        f"multi_diar_name={total_multi_diar_name} multi_diar_name_global={multi_diar_names_global}"
     )
 
     return dataset
