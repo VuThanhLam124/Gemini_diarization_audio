@@ -1,63 +1,100 @@
 # Audio Dataset Pipeline
 
-Pipeline giúp đóng gói dữ liệu audio và transcript thành định dạng Hugging Face Dataset để finetune STT/TTS.
+Repo hỗ trợ **2 chế độ** trong cùng `run_pipeline.py`:
+
+1. **Audio-only (mặc định mới)**: bắt đầu từ thư mục audio, tự diarization bằng pyannote, map speaker từ CSV (nếu có), xuất `wavs + metadata.csv + hf_dataset`.
+2. **Legacy config+transcript**: giữ nguyên luồng cũ dùng `config_*.json` + transcript marker.
 
 ## Cài đặt
 
+### 1) Legacy (nhẹ)
 ```bash
-pip install datasets torchcodec ffmpeg-python
+pip install -r requirements.txt
 ```
-Yêu cầu: `ffmpeg` đã được cài đặt trên hệ thống.
 
-## Hướng dẫn sử dụng (CLI)
-
-### 1. Chuẩn bị file Config (JSON)
-
-Tạo file `config.json` định nghĩa các file audio cần xử lý:
-
-```json
-{
-  "path/to/hatinh1.mp3": {
-    "segments": [
-      ["00:38-00:41"], 
-      ["00:43-01:11"]
-    ],
-    "transcript_path": "path/to/transcript_hatinh1.txt"
-  },
-  "path/to/audio2.mp3": {
-    "segments": [["01:00-01:10"]],
-    "transcript_path": "path/to/transcript_audio2.txt"
-  }
-}
-```
-**Lưu ý:** File transcript phải chứa câu marker (ví dụ: "Đây là đoạn âm thanh dùng để phân tách") để phân biệt các đoạn.
-
-### 2. Chạy lệnh tạo Dataset
-
+### 2) Audio-only diarization (pyannote)
 ```bash
-python run_pipeline.py --input-json config.json --output-dir my_dataset --dataset-name vn_voice
+pip install -r requirements_diarization.txt
+```
+Yêu cầu hệ thống: `ffmpeg` trong `PATH`.
+
+Ngoài ra cần Hugging Face token và đã accept terms cho:
+- `pyannote/speaker-diarization-3.1`
+- `pyannote/segmentation-3.0`
+- `pyannote/embedding`
+
+Token được đọc theo thứ tự:
+1. `--hf-token`
+2. `HF_TOKEN`
+3. `HUGGINGFACE_TOKEN`
+4. `HUGGINGFACE_ACCESS_TOKEN`
+5. `hugging_face_key.txt`
+
+## Chạy pipeline
+
+### A) Audio-only (default mới)
+```bash
+python run_pipeline.py \
+  --audio-dir outputs \
+  --output-dir my_dataset \
+  --dataset-name vn_voice \
+  --label-csv data_label_by_hand.csv
 ```
 
-### 3. Kết quả (Output)
-
-Trong thư mục `my_dataset/`:
-- `wavs/`: Các file audio đã cắt nhỏ (Format: mono, 16kHz).
-- `metadata.csv`: File chứa thông tin mapping (ID, path, text, duration) để kiểm tra.
-- `hf_dataset/`: Dữ liệu dạng binary Hugging Face, có thể load bằng python:
-
-```python
-from datasets import load_from_disk
-dataset = load_from_disk("my_dataset/hf_dataset")
-print(dataset[0])
+Có thể tune diarization:
+```bash
+python run_pipeline.py \
+  --audio-dir outputs \
+  --audio-pattern "*.mp3,*.wav" \
+  --device auto \
+  --merge-gap 2.0 \
+  --min-segment-duration 0.5 \
+  --min-overlap 0.70 \
+  --seg-min-duration-off 0.3 \
+  --clustering-threshold 0.7
 ```
 
----
+### B) Legacy config + transcript
+```bash
+python run_pipeline.py \
+  --input-json config_test.json \
+  --output-dir my_dataset \
+  --dataset-name vn_voice \
+  --label-csv data_label_by_hand.csv
+```
 
-## (Tools) Các tính năng khác
+## Output
 
-- **`merge_segments_with_marker`** (trong `edit_audio.py`): Gộp audio và chèn marker để gửi cho Gemini transcribe.
-- **`map_transcript_to_segments`**: Map text trả về từ Gemini vào từng segment gốc.
+Thư mục output:
+- `wavs/`: file wav đã cắt (mono, 16k)
+- `metadata.csv`
+- `hf_dataset/`
 
-## (Legacy) Diarization cũ
+### Schema metadata (audio-only mode)
+- `segment_id`
+- `audio`
+- `duration`
+- `start_sec`
+- `end_sec`
+- `abs_start_sec`
+- `abs_end_sec`
+- `source_file`
+- `diarization_speaker`
+- `speaker_label`
+- `speaker_id`
+- `speaker_name`
+- `speaker_gender`
+- `speaker_region`
+- `speaker_position`
+- `overlap_ratio`
 
-Tham khảo file `infer.py` để chạy flow cũ (Gemini API Call trực tiếp cho từng đoạn nhỏ).
+Rule:
+- Không dùng transcript trong audio-only mode.
+- `speaker_label = speaker_name` nếu map CSV thành công, ngược lại dùng `diarization_speaker`.
+- `speaker_id = 0` khi chưa map được speaker thật.
+
+## File chính
+- `run_pipeline.py`: entrypoint unified (legacy + audio-only)
+- `src/pyannote_diarization.py`: pyannote diarization + merge segments
+- `src/audio_only_dataset.py`: build dataset audio-only
+- `edit_audio.py`: logic legacy

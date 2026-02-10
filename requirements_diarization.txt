@@ -1,0 +1,6 @@
+pyannote.audio==3.1.1
+torch
+torchaudio
+huggingface_hub>=0.20.3
+datasets>=2.16.0
+numpy<2.0

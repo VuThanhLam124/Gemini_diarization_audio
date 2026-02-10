@@ -363,7 +363,8 @@ def merge_segments_with_marker(
 def map_transcript_to_segments(
     full_transcript: str,
     segments: list[list[str]],
-    marker_transcript: str = "Đây là đoạn âm thanh dùng để phân tách"
+    marker_transcript: str = "Đây là đoạn âm thanh dùng để phân tách",
+    source_name: str = ""
 ) -> list[dict]:
     """Map full transcript ve tung segment dua tren marker text.
     
@@ -393,6 +394,13 @@ def map_transcript_to_segments(
     # Nen ta chi strip whitespace
     parts = [p.strip() for p in parts if p.strip()]  # Loc bo phan tu chi toan khoang trang
     
+    if len(parts) != len(segments):
+        src = f" [{source_name}]" if source_name else ""
+        print(
+            f"Warning{src}: transcript parts ({len(parts)}) != segments ({len(segments)}). "
+            "Transcript co the bi lech index."
+        )
+
     mapped_results = []
     
     for i, seg_list in enumerate(segments):
@@ -684,14 +692,14 @@ def create_hf_dataset(
     """Tao HuggingFace Dataset tu nhieu file audio va transcript.
     
     Args:
-        segment_map: Dict { 'path/to/audio1.mp3': [['00:00-00:10'], ...], ... }
+        segment_map: Dict { 'path/to/audio1.mp3': [['00:00-00:10'], ...], ... } - timestamp SAU edit/marker
         transcript_map: Dict { 'path/to/audio1.mp3': 'Full transcript ...', ... }
         output_dir: Thu muc output
         dataset_name: Ten dataset
         push_to_hub: Co push len HF Hub hay khong
         hub_repo_id: Repo ID (vd: 'username/dataset_name')
         speaker_info_map: Dict speaker info tu parse_speaker_info_from_label
-        segment_original_map: Dict { audio_path: [['start', 'end'], ...] } - timestamp goc trong audio nho
+        segment_original_map: Dict { audio_path: [['start', 'end'], ...] } - timestamp GOC trong audio nho
         audio_offset_map: Dict { audio_path: offset_seconds } - offset cua audio nho trong audio goc
         
     Returns:
@@ -722,8 +730,12 @@ def create_hf_dataset(
             print(f"Warning: No transcript for {audio_path.name}")
             # Van tiep tuc xu ly nhung transcript se rong (hoac tuy logic)
         
-        # 1. Map transcript
-        mapped_data = map_transcript_to_segments(full_transcript, segments)
+        # 1. Map transcript theo timestamp SAU edit/marker
+        mapped_data = map_transcript_to_segments(
+            full_transcript,
+            segments,
+            source_name=audio_path.name
+        )
         
         # 2. Process tung segment
         file_prefix = audio_path.stem
@@ -732,12 +744,26 @@ def create_hf_dataset(
             seg_str = item['segment']
             text = item['transcript']
             
-            # Parse time
-            if "-" not in seg_str: continue
+            # Parse time (segment sau edit, dung cho fallback)
+            if "-" not in seg_str:
+                continue
             start_str, end_str = seg_str.split("-", 1)
-            start = parse_time(start_str)
-            end = parse_time(end_str)
-            duration = end - start
+            seg_after_start = parse_time(start_str)
+            seg_after_end = parse_time(end_str)
+
+            # Timestamp goc (truoc edit) de cat audio + match speaker
+            seg_orig_start = seg_after_start
+            seg_orig_end = seg_after_end
+            seg_orig_str = seg_str
+            seg_orig_list = segment_original_map.get(audio_path_str, []) if segment_original_map else []
+            if idx < len(seg_orig_list):
+                orig_ts = seg_orig_list[idx]
+                if len(orig_ts) >= 2:
+                    seg_orig_start = parse_time(orig_ts[0])
+                    seg_orig_end = parse_time(orig_ts[1])
+                    seg_orig_str = f"{orig_ts[0]}-{orig_ts[1]}"
+
+            duration = seg_orig_end - seg_orig_start
             
             if duration <= 0: continue
             
@@ -750,7 +776,7 @@ def create_hf_dataset(
             cmd = [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                 "-i", str(audio_path),
-                "-ss", str(start), "-t", str(duration),
+                "-ss", str(seg_orig_start), "-t", str(duration),
                 "-ac", "1", "-ar", "16000",
                 str(output_audio_path)
             ]
@@ -770,20 +796,8 @@ def create_hf_dataset(
                 speaker_list = speaker_info_map.get(file_id, [])
                 
                 if speaker_list:
-                    # Lay segment_original tuong ung (cung index voi segment)
-                    seg_orig_list = segment_original_map.get(audio_path_str, []) if segment_original_map else []
                     offset = audio_offset_map.get(audio_path_str, 0.0) if audio_offset_map else 0.0
-                    
-                    # Tinh timestamp trong audio goc
-                    seg_orig_start = start  # fallback
-                    seg_orig_end = end      # fallback
-                    
-                    if idx < len(seg_orig_list):
-                        orig_ts = seg_orig_list[idx]
-                        if len(orig_ts) >= 2:
-                            seg_orig_start = parse_time(orig_ts[0])
-                            seg_orig_end = parse_time(orig_ts[1])
-                    
+
                     # Tinh timestamp trong audio GOC = segment_original + offset
                     abs_start = seg_orig_start + offset
                     abs_end = seg_orig_end + offset
@@ -806,7 +820,7 @@ def create_hf_dataset(
                 "transcript": text,
                 "duration": duration,
                 "original_file": audio_path.name,
-                "original_segment": seg_str,
+                "original_segment": seg_orig_str,
                 "speaker_id": speaker_id,
                 "speaker_name": speaker_name,
                 "speaker_gender": speaker_gender,
