@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -154,7 +155,7 @@ class PyannoteDiarizer:
         resolved_device = self._resolve_device(device)
         token = resolve_hf_token(hf_token)
 
-        pipeline = Pipeline.from_pretrained(MODEL_ID, token=token)
+        pipeline = self._load_pipeline_compat(Pipeline, MODEL_ID, token)
         if pipeline is None:
             raise RuntimeError(
                 f"Failed to load {MODEL_ID}. Ensure HF token is valid and model terms are accepted."
@@ -176,6 +177,25 @@ class PyannoteDiarizer:
 
         pipeline.to(resolved_device)
         self.pipeline = pipeline
+
+    @staticmethod
+    def _load_pipeline_compat(Pipeline, model_id: str, token: str):
+        """
+        Load pyannote pipeline with backward-compatible auth kwargs.
+        Different pyannote versions accept either `token` or `use_auth_token`.
+        """
+        params = inspect.signature(Pipeline.from_pretrained).parameters
+
+        if "token" in params:
+            return Pipeline.from_pretrained(model_id, token=token)
+        if "use_auth_token" in params:
+            return Pipeline.from_pretrained(model_id, use_auth_token=token)
+
+        # Fallback for very old/new variants: rely on env vars and no explicit auth kwarg.
+        os.environ.setdefault("HF_TOKEN", token)
+        os.environ.setdefault("HUGGINGFACE_TOKEN", token)
+        os.environ.setdefault("HUGGINGFACE_ACCESS_TOKEN", token)
+        return Pipeline.from_pretrained(model_id)
 
     def _resolve_device(self, device: str):
         if device == "cpu":
