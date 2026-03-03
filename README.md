@@ -51,9 +51,15 @@ python run_pipeline.py \
   --min-segment-duration 2.5 \
   --max-segment-duration 20 \
   --min-overlap 0.70 \
+  --match-timeline auto \
   --seg-min-duration-off 0.3 \
   --clustering-threshold 0.7
 ```
+
+`--match-timeline`:
+- `auto` (default): tu chon `global` hoac `local` theo file de tang matched.
+- `global`: map bang `segment_time + offset` (timestamp trong audio goc).
+- `local`: map truc tiep theo timestamp trong tung chunk (khong cong offset).
 
 Chon nhieu file cu the bang list:
 ```bash
@@ -111,3 +117,25 @@ Rule:
 - `src/pyannote_diarization.py`: pyannote diarization + merge segments
 - `src/audio_only_dataset.py`: build dataset audio-only
 - `edit_audio.py`: logic legacy
+
+## Tải audio
+```bash
+python get_audio_youtube.py \
+  --youtube-url "https://www.youtube.com/watch?v=QUT2SNc4KYY" \
+  --output-dir data \
+  --youtube-cookies-from-browser chrome \
+  --youtube-js-runtime deno:/home/pytorch/.deno/bin/deno
+```
+
+## Tách audio 1 giờ (batch)
+
+Tách toàn bộ audio trong `data/` thành các file nhỏ 1 giờ.
+Nếu phần dư cuối nhỏ hơn 15 phút, phần dư sẽ được gộp vào chunk liền trước.
+
+```bash
+python split_audio_folder.py \
+  --input-dir data \
+  --output-dir outputs \
+  --chunk-seconds 3600 \
+  --min-tail-seconds 900
+```

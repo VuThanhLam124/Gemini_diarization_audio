@@ -272,6 +272,71 @@ def _find_best_speaker_match(
     return None, 0.0, 0.0
 
 
+def _build_overlap_maps(
+    file_rows: list[dict],
+    speaker_list: list[dict],
+    *,
+    min_overlap: float,
+    use_global_timeline: bool,
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, dict]], dict[str, dict], int, float]:
+    overlap_scores_by_diarization: dict[str, dict[str, float]] = {}
+    profile_by_diarization_and_name: dict[str, dict[str, dict]] = {}
+    row_profile_by_segment: dict[str, dict] = {}
+    matched_rows = 0
+    total_overlap = 0.0
+
+    for row in file_rows:
+        seg_start = float(row["abs_start_sec"] if use_global_timeline else row["start_sec"])
+        seg_end = float(row["abs_end_sec"] if use_global_timeline else row["end_sec"])
+
+        matched_speaker, _, overlap_seconds = _find_best_speaker_match(
+            seg_start,
+            seg_end,
+            speaker_list,
+            min_overlap=min_overlap,
+        )
+        if not matched_speaker:
+            continue
+
+        speaker_name = str(matched_speaker.get("speaker_name", "") or "").strip()
+        if not speaker_name:
+            continue
+
+        speaker_gender = str(matched_speaker.get("speaker_gender", "") or "").strip()
+        speaker_region = str(matched_speaker.get("speaker_region", "") or "").strip()
+        diarization_speaker = str(row["diarization_speaker"])
+        segment_id = str(row["segment_id"])
+
+        score_map = overlap_scores_by_diarization.setdefault(diarization_speaker, {})
+        score_map[speaker_name] = score_map.get(speaker_name, 0.0) + overlap_seconds
+
+        profile_map = profile_by_diarization_and_name.setdefault(diarization_speaker, {})
+        current_profile = profile_map.get(speaker_name)
+        if not current_profile or overlap_seconds > float(current_profile.get("overlap_seconds", 0.0)):
+            profile_map[speaker_name] = {
+                "speaker_gender": speaker_gender,
+                "speaker_region": speaker_region,
+                "overlap_seconds": overlap_seconds,
+            }
+
+        row_profile_by_segment[segment_id] = {
+            "speaker_name": speaker_name,
+            "speaker_gender": speaker_gender,
+            "speaker_region": speaker_region,
+            "overlap_seconds": overlap_seconds,
+        }
+        matched_rows += 1
+        total_overlap += overlap_seconds
+
+    return (
+        overlap_scores_by_diarization,
+        profile_by_diarization_and_name,
+        row_profile_by_segment,
+        matched_rows,
+        total_overlap,
+    )
+
+
 def apply_segment_length_constraints(
     segments: list[DiarizationSegment],
     *,
@@ -331,9 +396,15 @@ def create_audio_only_dataset(
     min_segment_duration: float,
     max_segment_duration: float,
     min_overlap: float,
+    match_timeline: str,
 ):
     """Run audio-only diarization pipeline and export dataset artifacts."""
     ensure_ffmpeg_exists()
+    match_timeline = str(match_timeline or "auto").strip().lower()
+    if match_timeline not in {"auto", "global", "local"}:
+        raise RuntimeError(
+            f"Invalid match_timeline '{match_timeline}'. Use one of: auto, global, local."
+        )
 
     audio_paths = resolve_audio_inputs(
         audio_dir=audio_dir,
@@ -394,6 +465,7 @@ def create_audio_only_dataset(
         file_rows: list[dict] = []
         overlap_scores_by_diarization: dict[str, dict[str, float]] = {}
         profile_by_diarization_and_name: dict[str, dict[str, dict]] = {}
+        timeline_mode_used = "no_label"
 
         for idx, segment in enumerate(segments):
             start_sec = segment.start_sec
@@ -416,38 +488,6 @@ def create_audio_only_dataset(
             diarization_speaker = _build_barcoded_speaker(segment.diarization_speaker, source_stem)
             all_diarization_labels.add(diarization_speaker)
 
-            speaker_name = ""
-            speaker_gender = ""
-            speaker_region = ""
-            overlap_seconds = 0.0
-
-            if speaker_list:
-                matched_speaker, _, overlap_seconds = _find_best_speaker_match(
-                    abs_start_sec,
-                    abs_end_sec,
-                    speaker_list,
-                    min_overlap=min_overlap,
-                )
-                if matched_speaker:
-                    speaker_name = str(matched_speaker.get("speaker_name", "") or "")
-                    speaker_gender = str(matched_speaker.get("speaker_gender", "") or "")
-                    speaker_region = str(matched_speaker.get("speaker_region", "") or "")
-
-            if speaker_name:
-                score_map = overlap_scores_by_diarization.setdefault(diarization_speaker, {})
-                score_map[speaker_name] = score_map.get(speaker_name, 0.0) + overlap_seconds
-
-                profile_map = profile_by_diarization_and_name.setdefault(diarization_speaker, {})
-                current_profile = profile_map.get(speaker_name)
-                if not current_profile or overlap_seconds > float(
-                    current_profile.get("overlap_seconds", 0.0)
-                ):
-                    profile_map[speaker_name] = {
-                        "speaker_gender": speaker_gender,
-                        "speaker_region": speaker_region,
-                        "overlap_seconds": overlap_seconds,
-                    }
-
             file_rows.append(
                 {
                     "segment_id": segment_id,
@@ -455,14 +495,73 @@ def create_audio_only_dataset(
                     "duration": duration,
                     "start_sec": start_sec,
                     "end_sec": end_sec,
+                    "abs_start_sec": abs_start_sec,
+                    "abs_end_sec": abs_end_sec,
                     "start_sec_glob": _format_hhmmss(abs_start_sec),
                     "end_sec_glob": _format_hhmmss(abs_end_sec),
                     "source_file": source_file,
                     "diarization_speaker": diarization_speaker,
-                    "speaker_gender": speaker_gender,
-                    "speaker_region": speaker_region,
+                    "speaker_gender": "",
+                    "speaker_region": "",
                 }
             )
+
+        if speaker_list and file_rows:
+            global_match = None
+            local_match = None
+
+            if match_timeline in {"auto", "global"}:
+                global_match = _build_overlap_maps(
+                    file_rows,
+                    speaker_list,
+                    min_overlap=min_overlap,
+                    use_global_timeline=True,
+                )
+            if match_timeline in {"auto", "local"}:
+                local_match = _build_overlap_maps(
+                    file_rows,
+                    speaker_list,
+                    min_overlap=min_overlap,
+                    use_global_timeline=False,
+                )
+
+            selected = None
+            if match_timeline == "global":
+                selected = global_match or local_match
+                timeline_mode_used = "global" if global_match else "local"
+            elif match_timeline == "local":
+                selected = local_match or global_match
+                timeline_mode_used = "local" if local_match else "global"
+            else:
+                global_hits = global_match[3] if global_match else -1
+                local_hits = local_match[3] if local_match else -1
+                global_overlap = global_match[4] if global_match else -1.0
+                local_overlap = local_match[4] if local_match else -1.0
+
+                use_local = local_hits > global_hits or (
+                    local_hits == global_hits and local_overlap > global_overlap
+                )
+                if use_local and local_match:
+                    selected = local_match
+                    timeline_mode_used = "local"
+                else:
+                    selected = global_match or local_match
+                    timeline_mode_used = "global" if global_match else "local"
+
+            if selected:
+                (
+                    overlap_scores_by_diarization,
+                    profile_by_diarization_and_name,
+                    row_profile_by_segment,
+                    _,
+                    _,
+                ) = selected
+                for row in file_rows:
+                    row_profile = row_profile_by_segment.get(str(row["segment_id"]), {})
+                    row["speaker_gender"] = str(row_profile.get("speaker_gender", "") or "")
+                    row["speaker_region"] = str(row_profile.get("speaker_region", "") or "")
+        elif speaker_list:
+            timeline_mode_used = "no_segment"
 
         canonical_name_by_diarization: dict[str, str] = {}
         canonical_profile_by_diarization: dict[str, dict] = {}
@@ -536,7 +635,8 @@ def create_audio_only_dataset(
         print(
             f"{source_file}: segments={file_segments} matched={file_matched} "
             f"fallback={file_fallback} dropped_short={dropped_short} "
-            f"conflicted_diar={file_conflicted_diar} multi_diar_name={file_multi_diar_name}"
+            f"conflicted_diar={file_conflicted_diar} multi_diar_name={file_multi_diar_name} "
+            f"timeline={timeline_mode_used} label_windows={len(speaker_list)}"
         )
 
         total_segments += file_segments

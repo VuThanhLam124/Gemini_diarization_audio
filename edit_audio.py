@@ -548,74 +548,141 @@ def parse_speaker_info_from_label(label_csv_path: Path | str) -> dict[str, list[
     """
     import csv
     import re
-    
+
+    def _norm_header(text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip()).casefold()
+
+    def _split_multiline(text: str) -> list[str]:
+        return [item.strip() for item in re.split(r"\r?\n+", str(text or "")) if item.strip()]
+
+    def _parse_timestamp_range(text: str) -> tuple[float, float, bool]:
+        raw = str(text or "").strip()
+        if not raw:
+            return 0.0, 0.0, False
+
+        normalized = (
+            raw.replace("–", "-")
+            .replace("—", "-")
+            .replace("−", "-")
+            .replace(":-", ":")
+        )
+
+        # Extract first 2 time tokens to avoid breakage on noisy separators.
+        time_tokens = re.findall(r"\d{1,3}:\d{1,2}(?::\d{1,2}(?:\.\d+)?)?", normalized)
+        if len(time_tokens) >= 2:
+            try:
+                return parse_time(time_tokens[0]), parse_time(time_tokens[1]), True
+            except Exception:
+                pass
+
+        if "-" in normalized:
+            parts = normalized.split("-", 1)
+            if len(parts) == 2:
+                try:
+                    return parse_time(parts[0].strip()), parse_time(parts[1].strip()), True
+                except Exception:
+                    pass
+
+        return 0.0, 0.0, False
+
     label_csv_path = Path(label_csv_path)
-    result = {}
-    
-    with open(label_csv_path, 'r', encoding='utf-8') as f:
+    result: dict[str, list[dict]] = {}
+
+    speaker_pattern = re.compile(
+        r"^\s*(\d+)\s*[_\-\s]+(male|female)\s*[_\-\s]+(central|south|north)\s*\(?\s*(.*?)\s*\)?\s*$",
+        flags=re.IGNORECASE,
+    )
+
+    bad_speaker_lines = 0
+    bad_timestamp_lines = 0
+    mismatched_row_counts = 0
+
+    with open(label_csv_path, "r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
+
+        fieldnames = reader.fieldnames or []
+        header_lookup = {_norm_header(name): name for name in fieldnames if name}
+
+        def _get_col(row: dict, aliases: list[str]) -> str:
+            for alias in aliases:
+                if alias in row:
+                    return str(row.get(alias) or "")
+                mapped = header_lookup.get(_norm_header(alias))
+                if mapped and mapped in row:
+                    return str(row.get(mapped) or "")
+            return ""
+
         for row in reader:
-            file_id = row.get('ID', '').strip()  # vd: hatinh1
+            file_id = _get_col(row, ["ID", "id"]).strip()
             if not file_id:
                 continue
-                
-            # Parse cot "Trinh tu nguoi noi" - format: "1_male_central (Nguyen Hong Linh - Giam doc)"
-            speaker_col = row.get('Trình tự người nói', '')
-            timestamp_col = row.get('Timestamp', '')
-            
-            # Split speakers va timestamps
-            speakers = [s.strip() for s in speaker_col.strip().split('\n') if s.strip()]
-            timestamps = [t.strip() for t in timestamp_col.strip().split('\n') if t.strip()]
-            
-            # Pattern: "1_male_central (Nguyen Hong Linh - Position)" hoac "1_male_south(Tran Van Ky)"
-            speaker_pattern = re.compile(
-                r'^(\d+)_(male|female)_(central|south|north)\s*\(([^)]+)\)'
+
+            speaker_col = _get_col(
+                row,
+                ["Trình tự người nói", "Trinh tu nguoi noi", "speaker", "speakers"],
             )
-            
-            speaker_list = []
-            for i, spk in enumerate(speakers):
-                match = speaker_pattern.match(spk)
-                if match:
-                    spk_num = match.group(1)
-                    gender = match.group(2)
-                    region = match.group(3)
-                    name_pos = match.group(4).strip()
-                    
-                    # Tach name va position neu co " - "
-                    if ' - ' in name_pos:
-                        name, position = name_pos.split(' - ', 1)
-                        name = name.strip()
-                        position = position.strip()
-                    else:
-                        name = name_pos
-                        position = ""
-                    
-                    # Parse timestamp: "0:43 - 4:03" hoac "1:02:14 - 1:04:46"
-                    ts = timestamps[i] if i < len(timestamps) else ''
-                    start_sec = 0.0
-                    end_sec = 0.0
-                    
-                    if ts and '-' in ts:
-                        try:
-                            parts = ts.split('-')
-                            if len(parts) == 2:
-                                start_sec = parse_time(parts[0].strip())
-                                end_sec = parse_time(parts[1].strip())
-                        except:
-                            pass
-                    
-                    speaker_list.append({
-                        'speaker_id': int(spk_num),
-                        'speaker_name': name,
-                        'speaker_gender': gender,
-                        'speaker_region': region,
-                        'speaker_position': position,
-                        'start_sec': start_sec,
-                        'end_sec': end_sec
-                    })
-                    
+            timestamp_col = _get_col(
+                row,
+                ["Timestamp", "TimeStamp", "timestamp", "Thời gian"],
+            )
+
+            speakers = _split_multiline(speaker_col)
+            timestamps = _split_multiline(timestamp_col)
+
+            if speakers and timestamps and len(speakers) != len(timestamps):
+                mismatched_row_counts += 1
+
+            speaker_list: list[dict] = []
+            for i, speaker_line in enumerate(speakers):
+                match = speaker_pattern.match(speaker_line)
+                if not match:
+                    bad_speaker_lines += 1
+                    continue
+
+                speaker_num = match.group(1)
+                gender = match.group(2).lower()
+                region = match.group(3).lower()
+                name_pos = match.group(4).strip()
+
+                # Tach name va position neu co " - "
+                if " - " in name_pos:
+                    name, position = name_pos.split(" - ", 1)
+                    name = name.strip()
+                    position = position.strip()
+                else:
+                    name = name_pos
+                    position = ""
+
+                ts = timestamps[i] if i < len(timestamps) else ""
+                start_sec = 0.0
+                end_sec = 0.0
+                if ts:
+                    start_sec, end_sec, ok = _parse_timestamp_range(ts)
+                    if not ok:
+                        bad_timestamp_lines += 1
+
+                speaker_list.append(
+                    {
+                        "speaker_id": int(speaker_num),
+                        "speaker_name": name,
+                        "speaker_gender": gender,
+                        "speaker_region": region,
+                        "speaker_position": position,
+                        "start_sec": start_sec,
+                        "end_sec": end_sec,
+                    }
+                )
+
             result[file_id] = speaker_list
-            
+
+    if bad_speaker_lines or bad_timestamp_lines or mismatched_row_counts:
+        print(
+            "Warning: Label CSV parsed with anomalies "
+            f"(mismatch_rows={mismatched_row_counts}, "
+            f"bad_speaker_lines={bad_speaker_lines}, "
+            f"bad_timestamp_lines={bad_timestamp_lines})"
+        )
+
     return result
 
 

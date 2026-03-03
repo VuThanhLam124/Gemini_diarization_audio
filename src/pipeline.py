@@ -7,6 +7,7 @@ import math
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -17,6 +18,7 @@ from typing import Iterable
 import requests
 import yt_dlp
 from langchain_core.prompts import PromptTemplate
+from yt_dlp.utils import DownloadError
 
 LOGGER = logging.getLogger("gemini_diarization")
 
@@ -91,9 +93,41 @@ def resolve_api_key(cli_key: str | None) -> str:
     raise RuntimeError("Missing API key. Set GEMINI_API_KEY or pass --api-key.")
 
 
-def download_youtube_audio(url: str, output_dir: str | Path) -> tuple[Path, str]:
+def _resolve_js_runtime(
+    js_runtime: str | None,
+) -> tuple[dict[str, dict[str, str]], set[str]]:
+    if js_runtime:
+        runtime_name, sep, runtime_path = js_runtime.partition(":")
+        runtime_name = runtime_name.strip().lower()
+        config: dict[str, str] = {}
+        if sep and runtime_path.strip():
+            config["path"] = runtime_path.strip()
+        if runtime_name:
+            return {runtime_name: config}, {"ejs:github"}
+        return {}, set()
+
+    detected_deno = shutil.which("deno")
+    if not detected_deno:
+        deno_in_home = Path.home() / ".deno" / "bin" / "deno"
+        if deno_in_home.exists():
+            detected_deno = str(deno_in_home)
+
+    if detected_deno:
+        return {"deno": {"path": detected_deno}}, {"ejs:github"}
+    return {}, set()
+
+
+def download_youtube_audio(
+    url: str,
+    output_dir: str | Path,
+    cookies_from_browser: str | None = None,
+    cookie_file: str | Path | None = None,
+    js_runtime: str | None = None,
+) -> tuple[Path, str]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    js_runtimes, remote_components = _resolve_js_runtime(js_runtime)
+
     ydl_opts = {
         "format": "bestaudio/best",
         "postprocessors": [
@@ -108,9 +142,35 @@ def download_youtube_audio(url: str, output_dir: str | Path) -> tuple[Path, str]
         "quiet": True,
         "no_warnings": True,
     }
+    if js_runtimes:
+        ydl_opts["js_runtimes"] = js_runtimes
+    if remote_components:
+        ydl_opts["remote_components"] = remote_components
+    if cookies_from_browser:
+        ydl_opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    if cookie_file:
+        ydl_opts["cookiefile"] = str(Path(cookie_file).expanduser().resolve())
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except DownloadError as exc:
+        message = str(exc)
+        if "Requested format is not available" in message:
+            raise RuntimeError(
+                "No downloadable format returned by YouTube for current runtime/client. "
+                "Install Deno and retry, or pass --youtube-js-runtime "
+                "deno:/home/<user>/.deno/bin/deno."
+            ) from exc
+        if "HTTP Error 403" in message or "confirm you’re not a bot" in message:
+            raise RuntimeError(
+                "YouTube blocked anonymous download (HTTP 403 / bot check). "
+                "Try adding --youtube-cookies-from-browser chrome "
+                "(or firefox), or pass --youtube-cookie-file <cookies.txt>. "
+                "If it still fails, use a JS runtime for challenge solving, e.g. "
+                "--youtube-js-runtime deno:/home/<user>/.deno/bin/deno."
+            ) from exc
+        raise RuntimeError(f"Failed to download YouTube audio: {message}") from exc
 
     if info.get("_type") == "playlist":
         raise RuntimeError("Only single video URL is supported.")
@@ -564,9 +624,18 @@ def resolve_audio_input(
     audio_file: str | None,
     output_dir: str | Path,
     file_id: str | None,
+    youtube_cookies_from_browser: str | None = None,
+    youtube_cookie_file: str | None = None,
+    youtube_js_runtime: str | None = None,
 ) -> tuple[Path, str]:
     if youtube_url:
-        audio_path, detected_id = download_youtube_audio(youtube_url, output_dir)
+        audio_path, detected_id = download_youtube_audio(
+            youtube_url,
+            output_dir,
+            cookies_from_browser=youtube_cookies_from_browser,
+            cookie_file=youtube_cookie_file,
+            js_runtime=youtube_js_runtime,
+        )
         return audio_path, file_id or detected_id
     if not audio_file:
         raise RuntimeError("Missing audio input.")

@@ -42,6 +42,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="data",
         help="Directory for downloaded audio",
     )
+    parser.add_argument(
+        "--youtube-cookies-from-browser",
+        help="Browser name for yt-dlp cookies (e.g. chrome, firefox)",
+    )
+    parser.add_argument(
+        "--youtube-cookie-file",
+        help="Path to cookies.txt exported from browser",
+    )
+    parser.add_argument(
+        "--youtube-js-runtime",
+        help="yt-dlp JS runtime, e.g. deno:/home/<user>/.deno/bin/deno",
+    )
     parser.add_argument("--file-id", help="Override file_id in output")
     parser.add_argument("--output", help="Write output to file")
     return parser
@@ -58,6 +70,9 @@ def main() -> None:
         audio_file=args.audio_file,
         output_dir=args.output_dir,
         file_id=args.file_id,
+        youtube_cookies_from_browser=args.youtube_cookies_from_browser,
+        youtube_cookie_file=args.youtube_cookie_file,
+        youtube_js_runtime=args.youtube_js_runtime,
     )
 
     lines, usage = run_pipeline(

@@ -339,6 +339,7 @@ def run_audio_only_mode(args: argparse.Namespace) -> int:
             min_segment_duration=args.min_segment_duration,
             max_segment_duration=args.max_segment_duration,
             min_overlap=args.min_overlap,
+            match_timeline=args.match_timeline,
         )
     except Exception as exc:
         print(f"Error: {exc}")
@@ -443,6 +444,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.70,
         help="Nguong overlap toi thieu de map speaker theo CSV",
+    )
+    parser.add_argument(
+        "--match-timeline",
+        choices=["auto", "global", "local"],
+        default="auto",
+        help=(
+            "Timeline de map speaker: global=start+offset, local=start trong tung chunk, "
+            "auto=chon che do co match tot hon theo tung file"
+        ),
     )
 
     return parser
