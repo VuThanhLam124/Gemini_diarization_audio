@@ -134,6 +134,11 @@ def _extract_file_id(stem: str) -> str:
     return stem
 
 
+def _should_skip_audio(audio_path: Path) -> bool:
+    stem = audio_path.stem.lower()
+    return "phuyen" in stem
+
+
 def compute_audio_offsets(audio_files: list[Path]) -> dict[str, float]:
     """Compute cumulative offsets for each audio part inside the same group."""
     grouped: dict[str, list[tuple[int, Path]]] = {}
@@ -411,6 +416,20 @@ def create_audio_only_dataset(
         audio_pattern=audio_pattern,
         audio_files=audio_files,
     )
+
+    skipped_audio_paths = [path for path in audio_paths if _should_skip_audio(path)]
+    if skipped_audio_paths:
+        print(
+            f"Skipping {len(skipped_audio_paths)} audio file(s) by rule: stem contains 'phuyen'"
+        )
+        for skipped_path in skipped_audio_paths:
+            print(f"  - {skipped_path.name}")
+        skipped_keys = {str(path.resolve()) for path in skipped_audio_paths}
+        audio_paths = [path for path in audio_paths if str(path.resolve()) not in skipped_keys]
+
+    if not audio_paths:
+        raise RuntimeError("No audio files left after skip rules were applied.")
+
     print(f"Discovered {len(audio_paths)} audio files")
 
     audio_offset_map = compute_audio_offsets(audio_paths)
@@ -501,6 +520,7 @@ def create_audio_only_dataset(
                     "end_sec_glob": _format_hhmmss(abs_end_sec),
                     "source_file": source_file,
                     "diarization_speaker": diarization_speaker,
+                    "speaker_name": "",
                     "speaker_gender": "",
                     "speaker_region": "",
                 }
@@ -533,13 +553,16 @@ def create_audio_only_dataset(
                 selected = local_match or global_match
                 timeline_mode_used = "local" if local_match else "global"
             else:
-                global_hits = global_match[3] if global_match else -1
-                local_hits = local_match[3] if local_match else -1
-                global_overlap = global_match[4] if global_match else -1.0
-                local_overlap = local_match[4] if local_match else -1.0
+                global_hits = max(0, global_match[3] if global_match else 0)
+                local_hits = max(0, local_match[3] if local_match else 0)
 
-                use_local = local_hits > global_hits or (
-                    local_hits == global_hits and local_overlap > global_overlap
+                # Auto mode chi fallback sang local khi global gan nhu khong map duoc.
+                global_low_threshold = max(2, int(0.02 * len(file_rows)))
+                local_margin = max(5, int(0.1 * len(file_rows)))
+                use_local = (
+                    bool(local_match)
+                    and local_hits >= global_hits + local_margin
+                    and global_hits <= global_low_threshold
                 )
                 if use_local and local_match:
                     selected = local_match
@@ -558,6 +581,7 @@ def create_audio_only_dataset(
                 ) = selected
                 for row in file_rows:
                     row_profile = row_profile_by_segment.get(str(row["segment_id"]), {})
+                    row["speaker_name"] = str(row_profile.get("speaker_name", "") or "")
                     row["speaker_gender"] = str(row_profile.get("speaker_gender", "") or "")
                     row["speaker_region"] = str(row_profile.get("speaker_region", "") or "")
         elif speaker_list:
@@ -589,17 +613,32 @@ def create_audio_only_dataset(
         file_fallback = 0
         for row in file_rows:
             diarization_speaker = row["diarization_speaker"]
+            row_speaker_name = str(row.get("speaker_name", "") or "").strip()
             canonical_name = canonical_name_by_diarization.get(diarization_speaker, "")
 
-            if canonical_name:
+            if row_speaker_name:
+                normalized_name = row_speaker_name.lower()
+                speaker_key = f"name:{normalized_name}"
+                global_name_to_diarization.setdefault(normalized_name, set()).add(diarization_speaker)
+
+                # Mapping diarization_speaker -> speaker_name giu theo canonical neu co.
+                if canonical_name:
+                    speaker_name_map[diarization_speaker] = canonical_name
+                else:
+                    speaker_name_map.setdefault(diarization_speaker, row_speaker_name)
+
+                speaker_gender = str(row["speaker_gender"] or "")
+                speaker_region = str(row["speaker_region"] or "")
+                file_matched += 1
+            elif canonical_name:
                 normalized_name = canonical_name.strip().lower()
                 speaker_key = f"name:{normalized_name}"
                 speaker_name_map[diarization_speaker] = canonical_name
                 global_name_to_diarization.setdefault(normalized_name, set()).add(diarization_speaker)
 
                 profile = canonical_profile_by_diarization.get(diarization_speaker, {})
-                speaker_gender = str(profile.get("speaker_gender", "") or row["speaker_gender"] or "")
-                speaker_region = str(profile.get("speaker_region", "") or row["speaker_region"] or "")
+                speaker_gender = str(row["speaker_gender"] or profile.get("speaker_gender", "") or "")
+                speaker_region = str(row["speaker_region"] or profile.get("speaker_region", "") or "")
                 file_matched += 1
             else:
                 speaker_key = f"diarization:{diarization_speaker}"
